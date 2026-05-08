@@ -1,0 +1,1180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Page Visibility Analyzer</title>
+  <meta name="description" content="See exactly what LLMs can extract from any web page — and what they miss.">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.10/babel.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0B0F13; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useCallback } = React;
+
+/* ═══════════════════════════════════════════════════════════════════
+   UTILITY HELPERS
+   ═══════════════════════════════════════════════════════════════════ */
+function strip(s) { return (s || "").replace(/\s+/g, " ").trim(); }
+function trunc(s, n = 100) { return !s ? "" : s.length > n ? s.slice(0, n) + "…" : s; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   PARSERS — extract structured data from a DOM document
+   ═══════════════════════════════════════════════════════════════════ */
+function parseDoc(html) {
+  return new DOMParser().parseFromString(html || "<html><body></body></html>", "text/html");
+}
+
+function extractMeta(doc) {
+  const items = [];
+  const t = doc.querySelector("title");
+  if (t) items.push({ name: "title", content: strip(t.textContent) });
+  const c = doc.querySelector('link[rel="canonical"]');
+  if (c) items.push({ name: "canonical", content: c.getAttribute("href") || "" });
+  doc.querySelectorAll("meta").forEach((m) => {
+    const name = m.getAttribute("name") || m.getAttribute("property") || m.getAttribute("http-equiv");
+    const content = m.getAttribute("content");
+    if (name && content) items.push({ name, content });
+  });
+  return items;
+}
+
+function extractSchema(doc) {
+  const items = [];
+  doc.querySelectorAll('script[type="application/ld+json"]').forEach((s) => {
+    try { items.push({ parsed: JSON.parse(s.textContent), raw: s.textContent.trim(), error: false }); }
+    catch { items.push({ parsed: null, raw: s.textContent.trim().slice(0, 300), error: true }); }
+  });
+  return items;
+}
+
+function extractHeadings(doc) {
+  const items = [];
+  doc.querySelectorAll("h1,h2,h3,h4,h5,h6").forEach((h) => {
+    // Get only direct text content, not nested style/script blocks
+    let text = "";
+    h.childNodes.forEach((n) => {
+      if (n.nodeType === Node.TEXT_NODE) text += n.textContent;
+      else if (n.nodeType === Node.ELEMENT_NODE && !["style","script","link"].includes(n.tagName.toLowerCase())) {
+        text += n.textContent;
+      }
+    });
+    text = strip(text);
+    // Filter out headings that are clearly CSS/code dumps
+    if (text.length > 1 && text.length < 500 && !/\{[^}]*!important/.test(text) && !/border-radius|font-family|background-color/.test(text)) {
+      items.push({ level: h.tagName, text });
+    }
+  });
+  return items;
+}
+
+function extractLinks(doc) {
+  const items = [], seen = new Set();
+  doc.querySelectorAll("a[href]").forEach((a) => {
+    const href = a.getAttribute("href") || "";
+    const text = strip(a.textContent).slice(0, 150);
+    if (!href || href.startsWith("javascript:") || href === "#") return;
+    const key = href + "|" + text;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push({ href, text: text || "[no anchor text]" });
+  });
+  return items;
+}
+
+function extractImages(doc) {
+  const items = [], seen = new Set();
+  doc.querySelectorAll("img").forEach((img) => {
+    const src = img.getAttribute("src") || img.getAttribute("data-src") || "";
+    const alt = img.getAttribute("alt") || "";
+    if (!src || seen.has(src)) return;
+    seen.add(src);
+    items.push({ src, alt, hasAlt: alt.length > 0 });
+  });
+  return items;
+}
+
+function extractText(doc) {
+  const blocks = [], seen = new Set();
+  if (!doc.body) return blocks;
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      const p = node.parentElement;
+      if (!p) return NodeFilter.FILTER_REJECT;
+      const tag = p.tagName?.toLowerCase();
+      if (["script","style","noscript","template","svg"].includes(tag)) return NodeFilter.FILTER_REJECT;
+      return node.textContent.trim().length < 5 ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  while (walker.nextNode()) {
+    const text = strip(walker.currentNode.textContent);
+    if (text.length >= 12 && !seen.has(text)) {
+      seen.add(text);
+      blocks.push({ text, tag: walker.currentNode.parentElement?.tagName?.toLowerCase() || "?" });
+    }
+  }
+  return blocks;
+}
+
+function extractDataAttrs(doc) {
+  const items = [];
+  if (!doc.body) return items;
+  doc.body.querySelectorAll("*").forEach((el) => {
+    Array.from(el.attributes).forEach((attr) => {
+      if (!attr.name.startsWith("data-")) return;
+      const val = attr.value.trim();
+      if (!val.startsWith("{") && !val.startsWith("[")) return;
+      try {
+        items.push({ element: el.tagName.toLowerCase(), attr: attr.name, data: JSON.parse(val) });
+      } catch {
+        try {
+          const decoded = val.replace(/&quot;/g,'"').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+          items.push({ element: el.tagName.toLowerCase(), attr: attr.name, data: JSON.parse(decoded) });
+        } catch { /* skip */ }
+      }
+    });
+  });
+  return items;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LAYER 1 — SOURCE AUDIT (flag problems)
+   ═══════════════════════════════════════════════════════════════════ */
+function auditSource(doc, html) {
+  const issues = [];
+
+  // 1. onclick-based navigation
+  doc.querySelectorAll("[onclick]").forEach((el) => {
+    const h = el.getAttribute("onclick") || "";
+    if (/navigate|router\.push|location\.href|window\.open|goTo|history\.push/i.test(h)) {
+      issues.push({
+        severity: "high", type: "fake-link",
+        title: "JS onclick navigation — not a real link",
+        detail: `<${el.tagName.toLowerCase()} onclick="${trunc(h,70)}"> "${trunc(strip(el.textContent),50)}"`,
+        why: "LLMs can't execute JavaScript. This navigation only works in a browser — LLMs will never discover the destination URL.",
+      });
+    }
+  });
+
+  // 2. React-style onClick navigate patterns in raw HTML
+  (html.match(/onClick\s*=\s*\{[^}]*(navigate|router\.push|history\.push)[^}]*\}/gi) || []).forEach((m) => {
+    issues.push({
+      severity: "high", type: "fake-link",
+      title: "React onClick navigation pattern",
+      detail: trunc(m, 120),
+      why: "JS framework navigation handler. The URL is embedded in code, not in an <a href> — LLMs won't follow it.",
+    });
+  });
+
+  // 3. Buttons with navigation handlers
+  doc.querySelectorAll("button[onclick]").forEach((btn) => {
+    const h = btn.getAttribute("onclick") || "";
+    if (/product|page|link|url|navigate|route/i.test(h)) {
+      issues.push({
+        severity: "high", type: "fake-link",
+        title: "Button with JS navigation",
+        detail: `<button onclick="${trunc(h,60)}">${trunc(strip(btn.textContent),40)}</button>`,
+        why: "Buttons with onclick handlers look clickable to users but are invisible navigation paths for LLMs.",
+      });
+    }
+  });
+
+  // 4. CSS-hidden links (inline)
+  doc.querySelectorAll("a[href]").forEach((a) => {
+    const style = (a.getAttribute("style")||"") + " " + (a.parentElement?.getAttribute("style")||"");
+    if (/display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0[^.]|height\s*:\s*0[^.]|font-size\s*:\s*0/i.test(style)) {
+      issues.push({
+        severity: "medium", type: "hidden-link",
+        title: "Link hidden via inline CSS",
+        detail: `<a href="${trunc(a.getAttribute("href"),60)}" style="${trunc(a.getAttribute("style"),60)}">${trunc(strip(a.textContent),40)}</a>`,
+        why: "Links hidden with inline CSS may be ignored by search engines and LLMs that detect cloaking patterns.",
+      });
+    }
+  });
+
+  // 5. Class-based hiding
+  doc.querySelectorAll('a[href][aria-hidden="true"]').forEach((a) => {
+    const href = a.getAttribute("href") || "";
+    if (href && href !== "#") {
+      issues.push({
+        severity: "low", type: "hidden-link",
+        title: "Link with aria-hidden=\"true\"",
+        detail: `<a href="${trunc(href,60)}" aria-hidden="true">${trunc(strip(a.textContent),40)}</a>`,
+        why: "aria-hidden tells assistive tech to ignore this element. Some LLMs may also skip it.",
+      });
+    }
+  });
+
+  // 6. Noscript content-hiding trick
+  doc.querySelectorAll("noscript").forEach((ns) => {
+    const inner = ns.innerHTML || "";
+    if (/display\s*:\s*none/i.test(inner)) {
+      const targetsBroad = /\b(body|html|#root|#app|#__next|main|\.app|\.page|\.content)\b[^{]*\{[^}]*display\s*:\s*none/i.test(inner);
+      const severity = targetsBroad ? "medium" : "low";
+      const selectorMatch = inner.match(/([^{]+)\{[^}]*display\s*:\s*none[^}]*\}/i);
+      const targetSelector = selectorMatch ? selectorMatch[1].trim().slice(0, 80) : "unknown element";
+
+      issues.push({
+        severity, type: "noscript-hide",
+        title: "Noscript block applies display:none when JS is off",
+        detail: `A <noscript> tag hides "${targetSelector}" when JavaScript is disabled.${targetsBroad ? " This targets a page-level container — it may blank out the entire page for no-JS visitors." : " This appears to target a specific element, not the whole page."}`,
+        why: "LLMs don't apply CSS, so this doesn't affect what they can read from the HTML source. However, if you're manually testing by disabling JavaScript in Chrome, this CSS will apply and may make the page look emptier than it actually is for LLMs.",
+      });
+    }
+  });
+
+  // 7. Invalid URL characters — identify each problematic char specifically
+  const badChars = {
+    "\u2019": { name: "curly apostrophe (right single quote)", code: "U+2019", fix: "remove or replace with nothing" },
+    "\u2018": { name: "curly apostrophe (left single quote)", code: "U+2018", fix: "remove or replace with nothing" },
+    "\u201C": { name: "left double smart quote", code: "U+201C", fix: "remove" },
+    "\u201D": { name: "right double smart quote", code: "U+201D", fix: "remove" },
+    "\u2014": { name: "em dash", code: "U+2014", fix: "replace with a single hyphen (-)" },
+    "\u2013": { name: "en dash", code: "U+2013", fix: "replace with a single hyphen (-)" },
+    "\u00A0": { name: "non-breaking space", code: "U+00A0", fix: "replace with a regular hyphen or remove" },
+    "\u200B": { name: "zero-width space", code: "U+200B", fix: "remove" },
+    "\u00E9": { name: "accented e (é)", code: "U+00E9", fix: "replace with 'e'" },
+    "\u00E8": { name: "accented è", code: "U+00E8", fix: "replace with 'e'" },
+    "\u00F1": { name: "ñ", code: "U+00F1", fix: "replace with 'n'" },
+    "\u00FC": { name: "ü", code: "U+00FC", fix: "replace with 'u'" },
+  };
+  const badCharPattern = /[\u2018\u2019\u201C\u201D\u2014\u2013\u00A0\u200B]/;
+  doc.querySelectorAll("a[href]").forEach((a) => {
+    const href = a.getAttribute("href") || "";
+    if (badCharPattern.test(href)) {
+      // Find all bad chars in this URL
+      const found = [];
+      for (const [char, info] of Object.entries(badChars)) {
+        if (href.includes(char)) {
+          found.push({ char, ...info });
+        }
+      }
+      // Build a suggested clean URL
+      let cleanHref = href;
+      for (const [char, info] of Object.entries(badChars)) {
+        if (info.fix.includes("hyphen")) cleanHref = cleanHref.replaceAll(char, "-");
+        else cleanHref = cleanHref.replaceAll(char, "");
+      }
+      // Remove consecutive hyphens and trailing hyphens from slug
+      cleanHref = cleanHref.replace(/-{2,}/g, "-").replace(/-\//g, "/").replace(/\/-/g, "/");
+
+      // Build highlighted href showing problem chars
+      let highlighted = href;
+      for (const f of found) {
+        highlighted = highlighted.replaceAll(f.char, `→ ${f.char} ←`);
+      }
+
+      const charList = found.map(f => `"${f.char}" — ${f.name} (${f.code}) — ${f.fix}`).join("\n");
+
+      issues.push({
+        severity: "high", type: "invalid-url",
+        title: `Link URL contains invalid character${found.length > 1 ? "s" : ""}: ${found.map(f => f.name).join(", ")}`,
+        detail: `href="${trunc(highlighted, 140)}"\n\nProblem character${found.length > 1 ? "s" : ""}:\n${charList}\n\nSuggested clean URL: ${trunc(cleanHref, 120)}`,
+        why: `The character ${found.map(f => `"${f.char}" (${f.name})`).join(" and ")} is not a valid URL character. It requires percent-encoding to resolve (e.g. ' becomes %E2%80%99) and most servers won't match this to a real page. LLMs and search engine crawlers will likely get a 404 or fail to follow the link. The slug should be sanitised to remove or replace these characters.`,
+      });
+    }
+  });
+
+  // 8. Empty JS containers
+  doc.querySelectorAll('[data-react-root],[id="root"],[id="app"],[id="__next"],[data-controller],[data-component]').forEach((el) => {
+    if (strip(el.textContent).length < 20) {
+      issues.push({
+        severity: "medium", type: "empty-container",
+        title: "Empty JS application container",
+        detail: `<${el.tagName.toLowerCase()} id="${el.id||""}" class="${trunc(el.className,50)}"> — ${strip(el.textContent).length} chars of content`,
+        why: "This container is likely populated by JavaScript after page load. Any content rendered inside it will be invisible to LLMs.",
+      });
+    }
+  });
+
+  // 9. Links only in JSON (not as real <a href>)
+  const jsonLinkRe = /"(?:href|url|link|productLink|slug)"\s*:\s*"(\/[^"]+)"/g;
+  let jm;
+  const flaggedJsonLinks = new Set();
+  while ((jm = jsonLinkRe.exec(html)) !== null) {
+    const url = jm[1];
+    if (flaggedJsonLinks.has(url)) continue;
+    if (!doc.querySelector(`a[href="${url}"], a[href*="${url}"]`)) {
+      flaggedJsonLinks.add(url);
+      issues.push({
+        severity: "medium", type: "json-only-link",
+        title: "URL in JSON data but no matching crawlable link",
+        detail: `URL: ${trunc(url,80)} — found in JSON but no <a href> equivalent`,
+        why: "This URL exists in embedded data but not as a real hyperlink. LLMs may read the JSON but won't recognise it as a navigable link.",
+      });
+    }
+  }
+
+  // 10. Consent / cookie gated content patterns
+  doc.querySelectorAll('[class*="cookie"],[class*="consent"],[class*="gdpr"],[id*="cookie"],[id*="consent"]').forEach((el) => {
+    const text = strip(el.textContent);
+    if (text.length > 50) {
+      issues.push({
+        severity: "low", type: "consent-content",
+        title: "Content inside cookie/consent wrapper",
+        detail: `<${el.tagName.toLowerCase()} class="${trunc(el.className,50)}"> contains ${text.length} chars`,
+        why: "Content inside consent-gated containers may not be accessible to all crawlers depending on how the consent flow is implemented.",
+      });
+    }
+  });
+
+  // 11. Images set via data-background-image (JS required)
+  doc.querySelectorAll("[data-background-image],[data-bg],[data-src-bg],[data-bg-src]").forEach((el) => {
+    const bgUrl = el.getAttribute("data-background-image") || el.getAttribute("data-bg") || el.getAttribute("data-src-bg") || el.getAttribute("data-bg-src") || "";
+    if (bgUrl) {
+      issues.push({
+        severity: "medium", type: "js-image",
+        title: "Image loaded via JS data attribute (not visible to LLMs)",
+        detail: `<${el.tagName.toLowerCase()}> data-background-image="${trunc(bgUrl, 80)}"`,
+        why: "This image URL is in a data attribute that requires JavaScript to apply as a CSS background. LLMs won't see this image at all.",
+      });
+    }
+  });
+
+  // 12. Links with rel="nofollow"
+  const nofollowLinks = [];
+  doc.querySelectorAll('a[rel*="nofollow"]').forEach((a) => {
+    const href = a.getAttribute("href") || "";
+    const text = strip(a.textContent).slice(0, 60);
+    if (href && href !== "#") nofollowLinks.push({ href, text });
+  });
+  if (nofollowLinks.length > 0) {
+    issues.push({
+      severity: "low", type: "nofollow-links",
+      title: `${nofollowLinks.length} link(s) with rel="nofollow"`,
+      detail: nofollowLinks.slice(0, 5).map(l => `${trunc(l.href,50)} — "${trunc(l.text,30)}"`).join(" | ") + (nofollowLinks.length > 5 ? ` … and ${nofollowLinks.length - 5} more` : ""),
+      why: "Links with rel=\"nofollow\" tell search engines not to pass link equity. LLMs can still read and follow them, but Googlebot treats them as hints not to crawl.",
+    });
+  }
+
+  // 13. Third-party widget placeholders (empty until JS loads external scripts)
+  doc.querySelectorAll('[class*="trustpilot"],[data-businessunit-id],[class*="yotpo"],[class*="bazaarvoice"],[class*="review"],[id*="disqus"],[class*="elfsight"],[class*="feefo"],[data-feefo]').forEach((el) => {
+    const text = strip(el.textContent);
+    if (text.length < 30) {
+      const cn = (el.className || "").toLowerCase();
+      const id = (el.id || "").toLowerCase();
+      const widgetName = cn.includes("trustpilot") || el.hasAttribute("data-businessunit-id") ? "Trustpilot" :
+        cn.includes("yotpo") ? "Yotpo" :
+        cn.includes("bazaarvoice") ? "Bazaarvoice" :
+        cn.includes("feefo") || el.hasAttribute("data-feefo") ? "Feefo" :
+        id.includes("disqus") ? "Disqus" :
+        cn.includes("elfsight") ? "Elfsight" : "Third-party";
+      issues.push({
+        severity: "medium", type: "widget-placeholder",
+        title: `${widgetName} widget placeholder (empty until JS loads)`,
+        detail: `<${el.tagName.toLowerCase()} class="${trunc(el.className,60)}"> — ${text.length} chars of content`,
+        why: `This ${widgetName} widget is an empty container that gets populated by external JavaScript. Reviews, ratings, and UGC content loaded this way are completely invisible to LLMs.`,
+      });
+    }
+  });
+
+  // 14. Images with only data-src (no real src) — lazy-load without fallback
+  const lazySrcImages = [];
+  doc.querySelectorAll("img[data-src]:not([src])").forEach((img) => {
+    const dataSrc = img.getAttribute("data-src") || "";
+    const alt = img.getAttribute("alt") || "";
+    lazySrcImages.push({ dataSrc, alt });
+  });
+  if (lazySrcImages.length > 0) {
+    const withAlt = lazySrcImages.filter(i => i.alt.length > 0).length;
+    const withoutAlt = lazySrcImages.length - withAlt;
+    const example = lazySrcImages[0];
+    issues.push({
+      severity: "low", type: "lazy-no-src",
+      title: `${lazySrcImages.length} image(s) use data-src without a src attribute (JS lazy-load)`,
+      detail: `Example: <img data-src="${trunc(example.dataSrc,70)}"${example.alt ? ` alt="${trunc(example.alt,40)}"` : ""}>\n\n${withAlt} image(s) have alt text, ${withoutAlt} do not.\n\n` +
+        (lazySrcImages.length > 1 ? `All ${lazySrcImages.length} images:\n` + lazySrcImages.map((img, i) => `${i+1}. data-src="${trunc(img.dataSrc,60)}" ${img.alt ? `alt="${trunc(img.alt,30)}"` : "— no alt"}`).join("\n") : ""),
+      why: `These images use a JS-based lazy-load pattern: the URL is in data-src instead of src, so they only load when JavaScript swaps it in. LLMs won't load the images themselves, but that's rarely an issue since they read alt text, not pixels.${withoutAlt > 0 ? ` However, ${withoutAlt} of these images also have no alt text — LLMs have zero information about those.` : " All of these have alt text, so LLMs can still understand what each image represents."} For crawlability, consider using native <img src="url" loading="lazy"> instead — same performance benefit, no JS dependency.`,
+      count: 1,
+    });
+  }
+
+  // 15. Bazaarvoice review widgets (uses data-bv-show, not class names)
+  doc.querySelectorAll("[data-bv-show],[data-bv-product-id]").forEach((el) => {
+    const bvType = el.getAttribute("data-bv-show") || "reviews";
+    const text = strip(el.textContent);
+    if (text.length < 50) {
+      issues.push({
+        severity: "high", type: "widget-placeholder",
+        title: `Bazaarvoice "${bvType}" widget (empty — requires JS to load)`,
+        detail: `<${el.tagName.toLowerCase()} data-bv-show="${bvType}"> — ${text.length} chars of content. Review ratings, counts, and UGC will not be visible.`,
+        why: "Bazaarvoice review widgets are empty placeholder elements that get populated by external JavaScript. Aggregate ratings, review counts, and all user-generated review content loaded this way are completely invisible to LLMs. This means LLMs cannot see social proof, star ratings, or review text for this product.",
+      });
+    }
+  });
+
+  // 16. "Read more" / truncated content patterns
+  doc.querySelectorAll('[class*="read-more"],[class*="readmore"],[class*="show-more"],[class*="showmore"],[data-readmore],[class*="truncat"],[class*="text-clamp"],[class*="line-clamp"],[class*="ellipsis"]').forEach((el) => {
+    const text = strip(el.textContent);
+    if (text.length > 20) {
+      issues.push({
+        severity: "medium", type: "truncated-content",
+        title: "Content behind a \"read more\" / truncation pattern",
+        detail: `<${el.tagName.toLowerCase()} class="${trunc(el.className,60)}"> — visible text: "${trunc(text,80)}"`,
+        why: "This content appears to use a \"read more\" expand pattern. LLMs will only see the truncated/visible portion. If the full content is in the HTML but hidden via CSS, LLMs may still read it — but if JS is needed to load the rest, the expanded content will be invisible.",
+      });
+    }
+  });
+  // Also check for CSS-based truncation via inline styles
+  doc.querySelectorAll('[style*="line-clamp"],[style*="webkit-line-clamp"],[style*="max-height"][style*="overflow"]').forEach((el) => {
+    const text = strip(el.textContent);
+    if (text.length > 30) {
+      issues.push({
+        severity: "low", type: "truncated-content",
+        title: "Content visually truncated via CSS (line-clamp or overflow hidden)",
+        detail: `<${el.tagName.toLowerCase()} style="${trunc(el.getAttribute("style"),60)}"> — ${text.length} chars of text`,
+        why: "This content is being visually truncated via CSS. The good news: the full text IS in the HTML, so LLMs can read it. But users may not see it all without interaction.",
+      });
+    }
+  });
+
+  // 17. Video/iframe embeds that may need JS
+  doc.querySelectorAll("iframe[data-src]:not([src]), [data-video-url], [data-video-id], [class*='video-placeholder'], [class*='video-container']:empty").forEach((el) => {
+    const videoUrl = el.getAttribute("data-src") || el.getAttribute("data-video-url") || el.getAttribute("data-video-id") || "";
+    issues.push({
+      severity: "medium", type: "js-video",
+      title: "Video embed requires JS to load",
+      detail: `<${el.tagName.toLowerCase()} ${videoUrl ? `data-src="${trunc(videoUrl,60)}"` : `class="${trunc(el.className,60)}"`}> — video content won't be visible to LLMs`,
+      why: "This video element needs JavaScript to initialise. LLMs won't see the video content, any transcript, or associated metadata unless it's also provided as text in the HTML.",
+    });
+  });
+
+  // 18. Empty content sections likely populated by JS (generic pattern)
+  doc.querySelectorAll("[data-component],[data-widget],[data-module],[data-carousel],[data-slider],[data-recommendations]").forEach((el) => {
+    const text = strip(el.textContent);
+    const tagName = el.tagName.toLowerCase();
+    if (text.length < 15 && tagName !== "script" && tagName !== "link") {
+      const componentName = el.getAttribute("data-component") || el.getAttribute("data-widget") || el.getAttribute("data-module") || el.getAttribute("data-carousel") || el.getAttribute("data-slider") || el.getAttribute("data-recommendations") || "unknown";
+      issues.push({
+        severity: "medium", type: "empty-widget",
+        title: `Empty JS component: "${trunc(componentName,40)}" (requires JS to populate)`,
+        detail: `<${tagName} data-component="${trunc(componentName,50)}"> — ${text.length} chars of content`,
+        why: "This looks like a JavaScript component placeholder that gets populated after page load. Cross-sell carousels, recommendation widgets, and dynamic content sections loaded this way are invisible to LLMs.",
+      });
+    }
+  });
+
+  // ── Deduplicate issues: group by type + core detail, show count ──
+  const deduped = [];
+  const seen = new Map();
+  for (const issue of issues) {
+    // Build a dedup key from type + the most identifying part of the detail
+    let key = issue.type + "|";
+    if (issue.type === "invalid-url") {
+      // Key on the href value
+      const hrefMatch = issue.detail.match(/href="([^"]+)"/);
+      key += hrefMatch ? hrefMatch[1] : issue.detail;
+    } else if (issue.type === "fake-link" || issue.type === "hidden-link") {
+      // Key on the href or onclick content
+      const hrefMatch = issue.detail.match(/href="([^"]+)"/) || issue.detail.match(/onclick="([^"]+)"/);
+      key += hrefMatch ? hrefMatch[1] : issue.detail;
+    } else if (issue.type === "js-image") {
+      const urlMatch = issue.detail.match(/data-background-image="([^"]+)"/);
+      key += urlMatch ? urlMatch[1] : issue.detail;
+    } else if (issue.type === "widget-placeholder") {
+      key += issue.title;
+    } else {
+      key += issue.detail;
+    }
+
+    if (seen.has(key)) {
+      seen.get(key).count += 1;
+    } else {
+      const entry = { ...issue, count: 1 };
+      seen.set(key, entry);
+      deduped.push(entry);
+    }
+  }
+
+  return deduped;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LAYER 3 — MEANINGFUL DIFF (source vs rendered)
+   ═══════════════════════════════════════════════════════════════════ */
+function computeDiff(src, ren) {
+  if (!ren) return null;
+
+  // Normalize URLs for comparison — strip domain, trailing slash, lowercase
+  const normUrl = (href) => {
+    let u = (href || "").trim();
+    // Strip protocol + domain to get path
+    u = u.replace(/^https?:\/\/[^\/]+/i, "");
+    // Remove trailing slash (but not if it's just "/")
+    if (u.length > 1 && u.endsWith("/")) u = u.slice(0, -1);
+    // Remove common tracking params
+    u = u.replace(/[?&](utm_[^&=]+=|ref=|source=|fbclid=|gclid=|mc_[^&=]+=)[^&]*/gi, "");
+    // Clean up leftover ? or &
+    u = u.replace(/\?$/, "").replace(/\?&/, "?");
+    return u.toLowerCase();
+  };
+
+  // Normalize image src similarly
+  const normImg = (src) => {
+    let u = (src || "").trim();
+    u = u.replace(/^https?:\/\/[^\/]+/i, "");
+    // Strip common image sizing params
+    u = u.replace(/[?&](w|h|width|height|size|resize|quality|q|format|f)=[^&]*/gi, "");
+    u = u.replace(/\?$/, "");
+    return u.toLowerCase();
+  };
+
+  const srcTexts = new Set(src.text.map(t => t.text));
+  const srcHrefs = new Set(src.links.map(l => normUrl(l.href)));
+  const srcH = new Set(src.headings.map(h => h.level + h.text));
+  const srcSchemaKeys = new Set(src.schema.map(s => JSON.stringify(s.parsed?.["@type"] || s.raw)));
+  const srcImgs = new Set(src.images.map(i => normImg(i.src)));
+
+  let addedText = ren.text.filter(t => !srcTexts.has(t.text));
+  let addedLinks = ren.links.filter(l => !srcHrefs.has(normUrl(l.href)));
+  const addedHeadings = ren.headings.filter(h => !srcH.has(h.level + h.text));
+  const addedSchema = ren.schema.filter(s => !srcSchemaKeys.has(JSON.stringify(s.parsed?.["@type"] || s.raw)));
+  const addedImages = ren.images.filter(i => !srcImgs.has(normImg(i.src)));
+
+  // ── Aggressive noise filtering ──
+  // Browser extensions
+  const extRe = /chrome-extension:\/\/|moz-extension:\/\/|safari-extension:\/\/|ms-browser-extension:\/\//i;
+  // Tracking & analytics
+  const trackRe = /gtm|analytics|tracking|dataLayer|fbq|_ga|cookie|gorgias|ometria|widget|rollbar|bat\.bing\.com|doubleclick|facebook\.com\/tr|google-analytics|googletagmanager|hotjar|clarity\.ms|hubspot|pardot|marketo|segment\.io|mixpanel|amplitude|optimizely|crazyegg|mouseflow/i;
+  // Browser TTS / extension UI patterns
+  const ttsRe = /^🇺🇸|^🇬🇧|^🏴|Microsoft\s+(David|George|Hazel|Mark|Susan|Zira|Haruka|Helena)|Google\s+(US|UK|Australian)|text.to.speech|reader.?mode|OpenDyslexic/i;
+  const extUiRe = /chrome-extension|moz-extension|readermode\.io|Settings\s*page|Share\s*to\s*a\s*new\s*group|Default\s*translation\s*language|Automatically\s*activate\s*Reader/i;
+
+  addedText = addedText.filter(t => {
+    if (t.text.length < 20) return false;
+    if (trackRe.test(t.text)) return false;
+    if (ttsRe.test(t.text)) return false;
+    if (extUiRe.test(t.text)) return false;
+    return true;
+  });
+  addedLinks = addedLinks.filter(l => {
+    if (extRe.test(l.href)) return false;
+    if (trackRe.test(l.href)) return false;
+    if (l.href.startsWith("data:") || l.href.startsWith("blob:") || l.href.startsWith("#/")) return false;
+    if (/readermode\.io|chrome\.google\.com\/webstore/i.test(l.href)) return false;
+    return true;
+  });
+  let addedImgs = addedImages.filter(i => {
+    if (extRe.test(i.src)) return false;
+    if (trackRe.test(i.src)) return false;
+    if (i.src.startsWith("data:") || i.src.startsWith("blob:")) return false;
+    return true;
+  });
+
+  return {
+    text: addedText,
+    links: addedLinks,
+    headings: addedHeadings.filter(h => !extUiRe.test(h.text) && !ttsRe.test(h.text)),
+    schema: addedSchema,
+    images: addedImgs,
+  };
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LAYER 4 — PROMOTE DIFF FINDINGS TO ISSUES
+   When the diff reveals important JS-only content, create issues.
+   ═══════════════════════════════════════════════════════════════════ */
+function promoteDiffToIssues(diff) {
+  if (!diff) return [];
+  const issues = [];
+
+  // ── JS-only product links (high severity) ──
+  const productLinks = diff.links.filter(l => /\/product[s]?\//i.test(l.href));
+  if (productLinks.length > 0) {
+    const preview = productLinks.slice(0, 5).map(l => `${trunc(l.href,60)} — "${trunc(l.text,40)}"`).join("\n");
+    const full = productLinks.length > 5
+      ? `\n\n── All ${productLinks.length} links ──\n` + productLinks.map((l, i) => `${i+1}. ${trunc(l.href,70)} — "${trunc(l.text,50)}"`).join("\n")
+      : "";
+    issues.push({
+      severity: "high", type: "js-only-product-links",
+      title: `${productLinks.length} product link(s) only load via JavaScript`,
+      detail: preview + full,
+      why: "These product links (cross-sells, \"complete the look\", \"you may also like\") are completely invisible to LLMs. This means internal link equity is not passed, and LLMs cannot discover these related products from this page.",
+      count: 1,
+    });
+  }
+
+  // ── JS-only non-product content links (medium) ──
+  const contentLinks = diff.links.filter(l => !(/\/product[s]?\//i.test(l.href)) && !(/youtube|instagram|twitter|facebook|strava|komoot|tiktok|pinterest|linkedin/i.test(l.href)));
+  if (contentLinks.length > 0) {
+    const preview = contentLinks.slice(0, 5).map(l => `${trunc(l.href,60)} — "${trunc(l.text,40)}"`).join("\n");
+    const full = contentLinks.length > 5
+      ? `\n\n── All ${contentLinks.length} links ──\n` + contentLinks.map((l, i) => `${i+1}. ${trunc(l.href,70)} — "${trunc(l.text,50)}"`).join("\n")
+      : "";
+    issues.push({
+      severity: "medium", type: "js-only-content-links",
+      title: `${contentLinks.length} content link(s) only load via JavaScript`,
+      detail: preview + full,
+      why: "These internal/content links are only in the rendered DOM. LLMs won't discover these pages from here, reducing crawlability and internal linking value.",
+      count: 1,
+    });
+  }
+
+  // ── JS-only social links (low) ──
+  const socialLinks = diff.links.filter(l => /youtube|instagram|twitter|facebook|strava|komoot|tiktok|pinterest|linkedin/i.test(l.href));
+  if (socialLinks.length > 0) {
+    issues.push({
+      severity: "low", type: "js-only-social-links",
+      title: `${socialLinks.length} social media link(s) only load via JavaScript`,
+      detail: socialLinks.map(l => trunc(l.href,60)).join("\n"),
+      why: "Social profile links are JS-only. Low impact for LLM visibility but means social signals aren't associated with the page in the initial HTML.",
+      count: 1,
+    });
+  }
+
+  // ── JS-only headings — severity based on level ──
+  const highHeadings = diff.headings.filter(h => h.level === "H1" || h.level === "H2");
+  const medHeadings = diff.headings.filter(h => h.level !== "H1" && h.level !== "H2");
+
+  if (highHeadings.length > 0) {
+    issues.push({
+      severity: "high", type: "js-only-headings-high",
+      title: `${highHeadings.length} key heading(s) (${highHeadings.map(h => h.level).join(", ")}) only exist after JavaScript runs`,
+      detail: highHeadings.map(h => `${h.level}: "${trunc(h.text,60)}"`).join("\n"),
+      why: "H1 and H2 headings are typically used for major page sections, so any that only appear after JavaScript runs are worth reviewing. Some may be critical content headings (product names, feature sections, reviews) that LLMs will miss entirely. Others may be functional UI labels (\"Search results\", \"Filter by\") which matter less. Check whether these headings help an LLM understand what the page is about — if they do, they should be in the source HTML.",
+      count: 1,
+    });
+  }
+  if (medHeadings.length > 0) {
+    issues.push({
+      severity: "medium", type: "js-only-headings-med",
+      title: `${medHeadings.length} sub-heading(s) (${[...new Set(medHeadings.map(h => h.level))].join(", ")}) only exist after JavaScript runs`,
+      detail: medHeadings.map(h => `${h.level}: "${trunc(h.text,60)}"`).join("\n"),
+      why: "Sub-headings that only appear after JS execution indicate content subsections invisible to LLMs. Less critical than H1/H2 but still represents missing content structure.",
+      count: 1,
+    });
+  }
+
+  // ── JS-only meaningful text (medium — indicates missing body content) ──
+  // Filter to only longer, meaningful text blocks
+  const meaningfulText = diff.text.filter(t => t.text.length > 30);
+  if (meaningfulText.length > 0) {
+    // Try to categorise
+    const productText = meaningfulText.filter(t => /price|£|\$|€|add to|basket|cart|delivery|stock|size/i.test(t.text));
+    const otherText = meaningfulText.filter(t => !/price|£|\$|€|add to|basket|cart|delivery|stock|size/i.test(t.text));
+
+    if (productText.length > 0) {
+      const preview = productText.slice(0, 5).map(t => `"${trunc(t.text,80)}"`).join("\n");
+      const full = productText.length > 5
+        ? `\n\n── All ${productText.length} blocks ──\n` + productText.map((t, i) => `${i+1}. "${trunc(t.text,100)}"`).join("\n")
+        : "";
+      issues.push({
+        severity: "high", type: "js-only-product-content",
+        title: `${productText.length} product-related text block(s) only load via JavaScript`,
+        detail: preview + full,
+        why: "Product information like prices, availability, descriptions, and calls-to-action are only in the rendered DOM. LLMs cannot see this product content, which impacts how they understand and represent this product.",
+        count: 1,
+      });
+    }
+    if (otherText.length > 3) {
+      const preview = otherText.slice(0, 5).map(t => `"${trunc(t.text,80)}"`).join("\n");
+      const full = otherText.length > 5
+        ? `\n\n── All ${otherText.length} blocks ──\n` + otherText.map((t, i) => `${i+1}. "${trunc(t.text,100)}"`).join("\n")
+        : "";
+      issues.push({
+        severity: "medium", type: "js-only-text-content",
+        title: `${otherText.length} text content block(s) only load via JavaScript`,
+        detail: preview + full,
+        why: "Meaningful text content that only appears after JS execution is invisible to LLMs. This could include feature descriptions, editorial content, or other important page information.",
+        count: 1,
+      });
+    }
+  }
+
+  // ── JS-only schema (high — structured data invisible to LLMs) ──
+  if (diff.schema.length > 0) {
+    issues.push({
+      severity: "high", type: "js-only-schema",
+      title: `${diff.schema.length} structured data block(s) only exist after JavaScript runs`,
+      detail: diff.schema.map(s => `@type: ${s.parsed?.["@type"] || "unknown"}`).join("\n"),
+      why: "JSON-LD structured data that's injected by JavaScript is invisible to LLMs fetching the raw HTML. If this includes Product schema, Review schema, or other rich data, it won't be available for LLM retrieval or rich results.",
+      count: 1,
+    });
+  }
+
+  // ── JS-only images (medium if significant count) ──
+  if (diff.images.length > 3) {
+    const preview = diff.images.slice(0, 5).map(i => `${trunc(i.src,60)} — alt: "${trunc(i.alt,30) || "none"}"`).join("\n");
+    const full = diff.images.length > 5
+      ? `\n\n── All ${diff.images.length} images ──\n` + diff.images.map((i, idx) => `${idx+1}. ${trunc(i.src,70)} — alt: "${trunc(i.alt,30) || "none"}"`).join("\n")
+      : "";
+    issues.push({
+      severity: "medium", type: "js-only-images",
+      title: `${diff.images.length} image(s) only load via JavaScript`,
+      detail: preview + full,
+      why: "These images only appear after JavaScript runs. If these are product images, they are invisible to LLMs and won't be associated with the product in AI-generated responses.",
+      count: 1,
+    });
+  }
+
+  return issues;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   FULL ANALYSIS PIPELINE
+   ═══════════════════════════════════════════════════════════════════ */
+function analyze(sourceHtml, renderedHtml) {
+  const sourceDoc = parseDoc(sourceHtml);
+  const sourceData = {
+    meta: extractMeta(sourceDoc), schema: extractSchema(sourceDoc),
+    headings: extractHeadings(sourceDoc), links: extractLinks(sourceDoc),
+    images: extractImages(sourceDoc), text: extractText(sourceDoc),
+    dataAttrs: extractDataAttrs(sourceDoc),
+  };
+  const issues = auditSource(sourceDoc, sourceHtml);
+
+  let renderedData = null, diff = null;
+  if (renderedHtml?.trim().length > 100) {
+    const renderedDoc = parseDoc(renderedHtml);
+    renderedData = {
+      meta: extractMeta(renderedDoc), schema: extractSchema(renderedDoc),
+      headings: extractHeadings(renderedDoc), links: extractLinks(renderedDoc),
+      images: extractImages(renderedDoc), text: extractText(renderedDoc),
+      dataAttrs: extractDataAttrs(renderedDoc),
+    };
+    diff = computeDiff(sourceData, renderedData);
+
+    // Promote significant diff findings to issues
+    const diffIssues = promoteDiffToIssues(diff);
+    issues.push(...diffIssues);
+  }
+
+  return { sourceData, renderedData, issues, diff };
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   DESIGN TOKENS
+   ═══════════════════════════════════════════════════════════════════ */
+const C = {
+  bg: "#0B0F13", surface: "#141A22", surface2: "#1A2130", border: "#252D3A",
+  borderLight: "#2E3A4A", text: "#D8DEE9", muted: "#7E8B9E", dim: "#4E5A6E",
+  accent: "#4DA8DA", accentDim: "#4DA8DA18",
+  green: "#4ADE80", greenBg: "#4ADE8012", red: "#F87171", redBg: "#F8717114",
+  orange: "#FBBF24", orangeBg: "#FBBF2412", purple: "#A78BFA", purpleBg: "#A78BFA12",
+  cyan: "#22D3EE",
+};
+
+/* ═══════════════════════════════════════════════════════════════════
+   COLLAPSIBLE SECTION
+   ═══════════════════════════════════════════════════════════════════ */
+function Section({ title, count, children, defaultOpen = false, tagText, tagColor }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <button onClick={() => setOpen(!open)} style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
+        padding: "11px 16px", background: C.surface2, border: `1px solid ${C.border}`,
+        borderRadius: open ? "8px 8px 0 0" : 8, color: C.text, fontFamily: "inherit",
+        fontSize: 12.5, fontWeight: 600, cursor: "pointer", borderBottom: open ? "none" : undefined,
+      }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ color: C.dim, fontSize: 9, transition: "transform 0.2s", transform: open ? "rotate(90deg)" : "none", display: "inline-block" }}>▶</span>
+          {title}
+          {tagText && <span style={{
+            fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 20,
+            background: (tagColor || C.accent) + "20", color: tagColor || C.accent,
+            letterSpacing: "0.03em",
+          }}>{tagText}</span>}
+        </span>
+        <span style={{ fontSize: 11, color: C.dim, fontWeight: 400 }}>{count !== undefined ? `${count} items` : ""}</span>
+      </button>
+      {open && (
+        <div style={{ border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 8px 8px", overflow: "hidden" }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Row({ children, cols = "1fr", highlight }) {
+  return (
+    <div style={{
+      display: "grid", gridTemplateColumns: cols, gap: 10, padding: "8px 16px",
+      borderBottom: `1px solid ${C.border}`, fontSize: 12, alignItems: "start",
+      background: highlight || "transparent",
+    }}>{children}</div>
+  );
+}
+
+function Badge({ children, color = C.accent }) {
+  return (
+    <span style={{
+      display: "inline-block", padding: "2px 8px", borderRadius: 20, fontSize: 10,
+      fontWeight: 700, background: color + "20", color, letterSpacing: "0.03em",
+      whiteSpace: "nowrap",
+    }}>{children}</span>
+  );
+}
+
+function Empty({ children }) {
+  return <div style={{ padding: "30px 20px", textAlign: "center", color: C.dim, fontSize: 12 }}>{children}</div>;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   MAIN APP
+   ═══════════════════════════════════════════════════════════════════ */
+function App() {
+  const [sourceHtml, setSourceHtml] = useState("");
+  const [renderedHtml, setRenderedHtml] = useState("");
+  const [results, setResults] = useState(null);
+  const [tab, setTab] = useState("audit");
+
+  const run = useCallback(() => {
+    if (!sourceHtml.trim()) return;
+    setResults(analyze(sourceHtml, renderedHtml));
+    setTab("audit");
+  }, [sourceHtml, renderedHtml]);
+
+  const clear = useCallback(() => { setSourceHtml(""); setRenderedHtml(""); setResults(null); }, []);
+
+  const r = results;
+  const highCount = r?.issues.filter(i => i.severity === "high").length || 0;
+  const medCount = r?.issues.filter(i => i.severity === "medium").length || 0;
+  const infoCount = r?.issues.filter(i => i.severity === "info").length || 0;
+  const lowCount = r?.issues.filter(i => i.severity === "low").length || 0;
+  const totalIssues = (highCount + medCount + lowCount);
+  const hasDiff = !!r?.diff;
+  const diffTotal = hasDiff ? (r.diff.text.length + r.diff.links.length + r.diff.headings.length + r.diff.schema.length + r.diff.images.length) : 0;
+
+  const sevColor = (s) => s === "high" ? C.red : s === "medium" ? C.orange : s === "info" ? C.accent : C.muted;
+
+  return (
+    <div style={{ background: C.bg, color: C.text, minHeight: "100vh", fontFamily: "'SF Mono','Fira Code','JetBrains Mono',Consolas,monospace", fontSize: 13, lineHeight: 1.55 }}>
+
+      {/* ── HEADER ── */}
+      <div style={{ borderBottom: `1px solid ${C.border}`, padding: "18px 24px", background: C.surface }}>
+        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+          <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0, letterSpacing: "-0.02em", display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ color: C.accent, fontSize: 20 }}>◈</span>
+            LLM Page Visibility Analyzer
+          </h1>
+          <p style={{ fontSize: 11.5, color: C.muted, marginTop: 4, marginBottom: 0 }}>
+            See exactly what LLMs can extract from any web page — and what they miss.
+          </p>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 20px" }}>
+
+        {/* ── INPUTS ── */}
+        <div style={{ padding: "24px 0 16px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+
+            {/* Source HTML */}
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: C.accent, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                Source HTML <span style={{ color: C.red }}>*</span>
+              </div>
+              <div style={{ fontSize: 11, color: C.dim, marginBottom: 8, lineHeight: 1.6 }}>
+                <strong style={{ color: C.muted }}>How to get this:</strong> Right-click the page → <strong style={{ color: C.muted }}>View Page Source</strong> (Ctrl+U / Cmd+U). Copy the entire content. This is what LLMs see when they fetch a URL.
+              </div>
+              <textarea
+                value={sourceHtml} onChange={e => setSourceHtml(e.target.value)}
+                placeholder="Paste full View Page Source HTML here..."
+                spellCheck={false}
+                style={{
+                  flex: 1, minHeight: 150, background: C.surface, border: `1px solid ${C.border}`,
+                  borderRadius: 8, color: C.text, fontFamily: "inherit", fontSize: 11.5,
+                  padding: 14, resize: "vertical", outline: "none",
+                }}
+                onFocus={e => e.target.style.borderColor = C.accent}
+                onBlur={e => e.target.style.borderColor = C.border}
+              />
+            </div>
+
+            {/* Rendered DOM */}
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: C.purple, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                Rendered DOM <span style={{ color: C.dim, fontWeight: 400, textTransform: "none", letterSpacing: "normal", fontSize: 11 }}>(optional — for comparison)</span>
+              </div>
+              <div style={{ fontSize: 11, color: C.dim, marginBottom: 8, lineHeight: 1.6 }}>
+                <strong style={{ color: C.muted }}>How to get this:</strong> Open DevTools (F12) → <strong style={{ color: C.muted }}>Elements</strong> tab → right-click the <code style={{ background: C.surface2, padding: "1px 5px", borderRadius: 3, color: C.purple, fontSize: 10.5 }}>&lt;html&gt;</code> tag → Copy → Copy outerHTML. This is the page after JS has run.
+              </div>
+              <textarea
+                value={renderedHtml} onChange={e => setRenderedHtml(e.target.value)}
+                placeholder="Paste rendered DOM HTML here (optional)..."
+                spellCheck={false}
+                style={{
+                  flex: 1, minHeight: 150, background: C.surface, border: `1px solid ${C.border}`,
+                  borderRadius: 8, color: C.text, fontFamily: "inherit", fontSize: 11.5,
+                  padding: 14, resize: "vertical", outline: "none",
+                }}
+                onFocus={e => e.target.style.borderColor = C.purple}
+                onBlur={e => e.target.style.borderColor = C.border}
+              />
+            </div>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14 }}>
+            <button onClick={run} disabled={!sourceHtml.trim()} style={{
+              background: sourceHtml.trim() ? C.accent : C.dim, color: C.bg, border: "none",
+              borderRadius: 8, padding: "10px 32px", fontSize: 13, fontWeight: 700,
+              fontFamily: "inherit", cursor: sourceHtml.trim() ? "pointer" : "default",
+              transition: "background 0.15s",
+            }}>Analyze Page</button>
+            {r && <button onClick={clear} style={{
+              background: "transparent", color: C.muted, border: `1px solid ${C.border}`,
+              borderRadius: 8, padding: "9px 20px", fontSize: 12, fontWeight: 600,
+              fontFamily: "inherit", cursor: "pointer",
+            }}>Clear</button>}
+          </div>
+        </div>
+
+        {/* ── RESULTS ── */}
+        {r && (
+          <>
+            {/* Summary Cards */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 10, padding: "8px 0 20px" }}>
+              {[
+                { n: highCount, label: "High Issues", color: highCount > 0 ? C.red : C.green },
+                { n: medCount, label: "Medium Issues", color: medCount > 0 ? C.orange : C.green },
+                { n: r.sourceData.links.length, label: "Crawlable Links", color: C.accent },
+                { n: r.sourceData.schema.length, label: "Schema Blocks", color: C.purple },
+                { n: r.sourceData.headings.length, label: "Headings", color: C.green },
+                { n: r.sourceData.images.length, label: "Images", color: C.cyan },
+                { n: r.sourceData.text.length, label: "Text Blocks", color: C.text },
+                ...(hasDiff ? [{ n: diffTotal, label: "JS-Only Content", color: diffTotal > 0 ? C.red : C.green }] : []),
+              ].map((card, i) => (
+                <div key={i} style={{
+                  background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8,
+                  padding: "12px 14px", borderLeft: `3px solid ${card.color}`,
+                }}>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: card.color, letterSpacing: "-0.03em" }}>{card.n}</div>
+                  <div style={{ fontSize: 9.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 2 }}>{card.label}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Tabs */}
+            <div style={{ display: "flex", gap: 0, borderBottom: `1px solid ${C.border}`, marginBottom: 20 }}>
+              {[
+                { id: "audit", label: `Issues & Flags${totalIssues > 0 ? ` (${totalIssues})` : ""}` },
+                { id: "content", label: "LLM Visible Content" },
+                ...(hasDiff ? [{ id: "diff", label: `JS-Only Content${diffTotal > 0 ? ` (${diffTotal})` : ""}` }] : []),
+              ].map(t => (
+                <button key={t.id} onClick={() => setTab(t.id)} style={{
+                  padding: "11px 20px", fontSize: 12, fontWeight: 600, fontFamily: "inherit",
+                  color: tab === t.id ? C.text : C.dim, background: "none", border: "none",
+                  borderBottom: tab === t.id ? `2px solid ${C.accent}` : "2px solid transparent",
+                  cursor: "pointer", transition: "color 0.15s",
+                }}>{t.label}</button>
+              ))}
+            </div>
+
+            {/* ── TAB: AUDIT ── */}
+            {tab === "audit" && (
+              r.issues.length === 0 ? (
+                <Empty><span style={{ fontSize: 22, color: C.green }}>✓</span><p style={{ marginTop: 8 }}>No issues detected. The source HTML looks clean for LLM visibility.</p></Empty>
+              ) : (
+                <Section title="Issues Found" count={r.issues.length} defaultOpen tagText={highCount > 0 ? `${highCount} high` : "clean"} tagColor={highCount > 0 ? C.red : C.green}>
+                  {r.issues.map((issue, i) => (
+                    <div key={i} style={{
+                      display: "grid", gridTemplateColumns: "auto 1fr", gap: 12,
+                      padding: "12px 16px", borderBottom: `1px solid ${C.border}`,
+                      background: issue.severity === "high" ? C.redBg : issue.severity === "medium" ? C.orangeBg : "transparent",
+                    }}>
+                      <Badge color={sevColor(issue.severity)}>{issue.severity}</Badge>
+                      <div>
+                        <div style={{ fontWeight: 600, marginBottom: 3, display: "flex", alignItems: "center", gap: 8 }}>
+                          {issue.title}
+                          {issue.count > 1 && (
+                            <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 7px", borderRadius: 10, background: C.dim + "30", color: C.muted }}>
+                              ×{issue.count} on page
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 11, color: C.muted, wordBreak: "break-all", whiteSpace: "pre-wrap" }}>{issue.detail}</div>
+                        <div style={{
+                          fontSize: 11, color: C.muted, marginTop: 6, padding: "7px 10px",
+                          background: C.surface2, borderRadius: 4, borderLeft: `2px solid ${C.orange}`, lineHeight: 1.6,
+                        }}>
+                          <strong style={{ color: C.orange }}>Why it matters:</strong> {issue.why}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </Section>
+              )
+            )}
+
+            {/* ── TAB: CONTENT ── */}
+            {tab === "content" && (
+              <>
+                <Section title="Meta & OG Tags" count={r.sourceData.meta.length} defaultOpen color={C.accent}>
+                  {r.sourceData.meta.map((m, i) => (
+                    <Row key={i} cols="160px 1fr">
+                      <span style={{ color: C.accent, fontWeight: 600 }}>{m.name}</span>
+                      <span style={{ color: C.muted, wordBreak: "break-all" }}>{trunc(m.content, 200)}</span>
+                    </Row>
+                  ))}
+                  {r.sourceData.meta.length === 0 && <Empty>No meta tags found</Empty>}
+                </Section>
+
+                <Section title="Structured Data (JSON-LD)" count={r.sourceData.schema.length} defaultOpen tagColor={C.purple}>
+                  {r.sourceData.schema.map((s, i) => (
+                    <div key={i} style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}` }}>
+                      {s.error ? (
+                        <span style={{ color: C.red }}>Parse error — {s.raw}</span>
+                      ) : (
+                        <>
+                          <div style={{ fontWeight: 600, marginBottom: 6, color: C.purple }}>@type: {s.parsed?.["@type"] || "unknown"}</div>
+                          <pre style={{ fontSize: 11, color: C.muted, whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0, maxHeight: 200, overflow: "auto" }}>
+                            {JSON.stringify(s.parsed, null, 2)}
+                          </pre>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                  {r.sourceData.schema.length === 0 && <Empty>No JSON-LD structured data found</Empty>}
+                </Section>
+
+                <Section title="Heading Hierarchy" count={r.sourceData.headings.length} defaultOpen={false}>
+                  {r.sourceData.headings.map((h, i) => {
+                    const indent = (parseInt(h.level.replace("H","")) - 1) * 20;
+                    return (
+                      <Row key={i} cols="50px 1fr">
+                        <span style={{ paddingLeft: indent }}><Badge color={h.level === "H1" ? C.accent : C.dim}>{h.level}</Badge></span>
+                        <span style={{ paddingLeft: indent }}>{trunc(h.text, 120)}</span>
+                      </Row>
+                    );
+                  })}
+                  {r.sourceData.headings.length === 0 && <Empty>No headings found</Empty>}
+                </Section>
+
+                <Section title="Crawlable Links" count={r.sourceData.links.length} defaultOpen={false}>
+                  {r.sourceData.links.map((l, i) => (
+                    <Row key={i} cols="1fr 1fr">
+                      <span style={{ color: C.muted, wordBreak: "break-all", fontSize: 11 }}>{trunc(l.href, 80)}</span>
+                      <span style={{ fontSize: 11 }}>{trunc(l.text, 80)}</span>
+                    </Row>
+                  ))}
+                  {r.sourceData.links.length === 0 && <Empty>No crawlable links found — this is a major red flag</Empty>}
+                </Section>
+
+                <Section title="Images" count={r.sourceData.images.length} defaultOpen={false}>
+                  {r.sourceData.images.map((img, i) => (
+                    <Row key={i} cols="1fr 1fr auto">
+                      <span style={{ color: C.muted, wordBreak: "break-all", fontSize: 11 }}>{trunc(img.src, 80)}</span>
+                      <span style={{ fontSize: 11 }}>{img.alt || <span style={{ color: C.red, fontStyle: "italic" }}>missing alt text</span>}</span>
+                      <Badge color={img.hasAlt ? C.green : C.red}>{img.hasAlt ? "alt ✓" : "no alt"}</Badge>
+                    </Row>
+                  ))}
+                  {r.sourceData.images.length === 0 && <Empty>No images found in source</Empty>}
+                </Section>
+
+                <Section title="Text Content Blocks" count={r.sourceData.text.length} defaultOpen={false}>
+                  {r.sourceData.text.map((t, i) => (
+                    <Row key={i} cols="55px 1fr">
+                      <span style={{ fontSize: 10, color: C.dim }}>&lt;{t.tag}&gt;</span>
+                      <span style={{ fontSize: 11, color: C.muted }}>{trunc(t.text, 150)}</span>
+                    </Row>
+                  ))}
+                  {r.sourceData.text.length === 0 && <Empty>No meaningful text content found — this page may be fully JS-rendered</Empty>}
+                </Section>
+
+                <Section title="Data Attributes (JSON)" count={r.sourceData.dataAttrs.length} defaultOpen={false} tagColor={C.purple}>
+                  {r.sourceData.dataAttrs.map((d, i) => (
+                    <div key={i} style={{ padding: "8px 16px", borderBottom: `1px solid ${C.border}` }}>
+                      <span style={{ color: C.accent, fontSize: 11 }}>
+                        &lt;{d.element} <span style={{ color: C.purple }}>{d.attr}</span>&gt;
+                      </span>
+                      <pre style={{ fontSize: 10, color: C.dim, whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "4px 0 0", maxHeight: 100, overflow: "auto" }}>
+                        {JSON.stringify(d.data, null, 2).slice(0, 400)}
+                      </pre>
+                    </div>
+                  ))}
+                  {r.sourceData.dataAttrs.length === 0 && <Empty>No JSON data attributes found</Empty>}
+                </Section>
+              </>
+            )}
+
+            {/* ── TAB: DIFF ── */}
+            {tab === "diff" && hasDiff && (
+              diffTotal === 0 ? (
+                <Empty>
+                  <span style={{ fontSize: 22, color: C.green }}>✓</span>
+                  <p style={{ marginTop: 8 }}>No meaningful content differences found. The source HTML appears to contain all important page content.</p>
+                </Empty>
+              ) : (
+                <>
+                  <div style={{ padding: "0 0 16px", fontSize: 12, color: C.muted, lineHeight: 1.6 }}>
+                    The following content <strong style={{ color: C.red }}>only exists after JavaScript runs</strong> — LLMs and basic HTTP fetchers will not see it.
+                  </div>
+
+                  {r.diff.links.length > 0 && (
+                    <Section title="Links only in rendered DOM (invisible to LLMs)" count={r.diff.links.length} defaultOpen tagText="JS-only" tagColor={C.red}>
+                      {r.diff.links.map((l, i) => (
+                        <Row key={i} cols="1fr 1fr" highlight={C.redBg}>
+                          <span style={{ color: C.red, wordBreak: "break-all", fontSize: 11 }}>{trunc(l.href, 80)}</span>
+                          <span style={{ fontSize: 11, color: C.muted }}>{trunc(l.text, 80)}</span>
+                        </Row>
+                      ))}
+                    </Section>
+                  )}
+
+                  {r.diff.text.length > 0 && (
+                    <Section title="Text content only in rendered DOM" count={r.diff.text.length} defaultOpen tagText="JS-only" tagColor={C.red}>
+                      {r.diff.text.map((t, i) => (
+                        <Row key={i} cols="55px 1fr" highlight={C.redBg}>
+                          <span style={{ fontSize: 10, color: C.dim }}>&lt;{t.tag}&gt;</span>
+                          <span style={{ fontSize: 11, color: C.red }}>{trunc(t.text, 150)}</span>
+                        </Row>
+                      ))}
+                    </Section>
+                  )}
+
+                  {r.diff.headings.length > 0 && (
+                    <Section title="Headings only in rendered DOM" count={r.diff.headings.length} defaultOpen tagText="JS-only" tagColor={C.red}>
+                      {r.diff.headings.map((h, i) => (
+                        <Row key={i} cols="50px 1fr" highlight={C.redBg}>
+                          <Badge color={C.red}>{h.level}</Badge>
+                          <span style={{ color: C.red }}>{h.text}</span>
+                        </Row>
+                      ))}
+                    </Section>
+                  )}
+
+                  {r.diff.schema.length > 0 && (
+                    <Section title="Structured data only in rendered DOM" count={r.diff.schema.length} defaultOpen tagText="JS-only" tagColor={C.red}>
+                      {r.diff.schema.map((s, i) => (
+                        <div key={i} style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}`, background: C.redBg }}>
+                          <div style={{ color: C.red, fontWeight: 600 }}>@type: {s.parsed?.["@type"] || "unknown"}</div>
+                        </div>
+                      ))}
+                    </Section>
+                  )}
+
+                  {r.diff.images.length > 0 && (
+                    <Section title="Images only in rendered DOM" count={r.diff.images.length} defaultOpen={false} tagText="JS-only" tagColor={C.orange}>
+                      {r.diff.images.map((img, i) => (
+                        <Row key={i} cols="1fr 1fr">
+                          <span style={{ color: C.muted, wordBreak: "break-all", fontSize: 11 }}>{trunc(img.src, 80)}</span>
+                          <span style={{ fontSize: 11 }}>{img.alt || <span style={{ color: C.red, fontStyle: "italic" }}>no alt</span>}</span>
+                        </Row>
+                      ))}
+                    </Section>
+                  )}
+                </>
+              )
+            )}
+
+            <div style={{ height: 60 }} />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(App));
+  </script>
+</body>
+</html>
