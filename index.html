@@ -707,10 +707,11 @@ function generateReport(r, crawlResults) {
    CRAWL TEST COMPONENT
    ═══════════════════════════════════════════════════════════════════ */
 const WORKER_URL_KEY = "llm-analyzer-worker-url";
+const DEFAULT_WORKER_URL = "https://llm-crawl-tester.google-cb4.workers.dev";
 
 function CrawlTest({ onResults }) {
   const [workerUrl, setWorkerUrl] = useState(() => {
-    try { return localStorage.getItem(WORKER_URL_KEY) || ""; } catch { return ""; }
+    try { return localStorage.getItem(WORKER_URL_KEY) || DEFAULT_WORKER_URL; } catch { return DEFAULT_WORKER_URL; }
   });
   const [testUrl, setTestUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -876,7 +877,8 @@ function CrawlTest({ onResults }) {
       {loading && (
         <div className="fade-in" style={{ padding: "40px 20px", textAlign: "center" }}>
           <div style={{ display: "inline-block", width: 28, height: 28, border: "3px solid var(--border)", borderTopColor: "var(--cyan)", borderRadius: "50%", animation: "spin 0.8s linear infinite", marginBottom: 12 }} />
-          <p style={{ color: "var(--muted)", fontSize: 13 }}>Testing with 13 different user agents{"\u2026"}</p>
+          <p style={{ color: "var(--muted)", fontSize: 13 }}>Testing with 17 crawlers {"\u00D7"} 3 passes (with delays between each){"\u2026"}</p>
+          <p style={{ color: "var(--dim)", fontSize: 11, marginTop: 6 }}>This takes about 10 seconds to check for intermittent blocking</p>
         </div>
       )}
 
@@ -899,14 +901,16 @@ function CrawlTest({ onResults }) {
             const redirected = bots.filter(r => r.status >= 300 && r.status < 400);
             const errored = bots.filter(r => r.status === 0);
             const other = bots.filter(r => !r.blocked && r.status !== 200 && !(r.status >= 300 && r.status < 400) && r.status !== 0);
+            const intermittent = bots.filter(r => r.passes && r.passes.length > 1 && !r.consistent);
 
             return (
               <>
                 {/* Summary cards */}
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12, marginBottom: 24 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 12, marginBottom: 24 }}>
                   {[
                     { n: ok.length, label: "Allowed", color: ok.length > 0 ? "var(--green)" : "var(--dim)" },
-                    { n: blocked.length, label: "Blocked (403)", color: blocked.length > 0 ? "var(--red)" : "var(--green)" },
+                    { n: blocked.length, label: "Blocked", color: blocked.length > 0 ? "var(--red)" : "var(--green)" },
+                    { n: intermittent.length, label: "Intermittent", color: intermittent.length > 0 ? "var(--orange)" : "var(--dim)" },
                     { n: redirected.length, label: "Redirected", color: redirected.length > 0 ? "var(--orange)" : "var(--dim)" },
                     { n: errored.length + other.length, label: "Errors / Other", color: (errored.length + other.length) > 0 ? "var(--orange)" : "var(--dim)" },
                   ].map((card, i) => (
@@ -932,20 +936,44 @@ function CrawlTest({ onResults }) {
 
                 {/* Bot results */}
                 <Section title="Crawler Results" count={bots.length} defaultOpen tagText={blocked.length > 0 ? `${blocked.length} blocked` : "all clear"} tagColor={blocked.length > 0 ? "var(--red)" : "var(--green)"}>
-                  {bots.map((cr, i) => (
+                  {bots.map((cr, i) => {
+                    const hasPasses = cr.passes && cr.passes.length > 1;
+                    const inconsistent = hasPasses && !cr.consistent;
+                    return (
                     <div key={i} style={{
                       display: "grid", gridTemplateColumns: "32px 1fr auto auto",
                       gap: 14, padding: "12px 18px", alignItems: "center",
                       borderBottom: "1px solid var(--border)",
-                      background: cr.blocked ? "var(--red-bg)" : "transparent",
+                      background: inconsistent ? "var(--orange-bg)" : cr.blocked ? "var(--red-bg)" : "transparent",
                     }}>
                       <span style={{ fontSize: 18, color: statusColor(cr), textAlign: "center" }}>{statusIcon(cr)}</span>
                       <div>
                         <div style={{ fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
                           {cr.name}
                           <span style={{ fontSize: 11, color: "var(--dim)", fontWeight: 400 }}>{cr.org}</span>
+                          {inconsistent && <Badge color="var(--orange)">intermittent</Badge>}
                         </div>
                         <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 2 }}>{cr.description}</div>
+                        {/* Per-pass status dots */}
+                        {hasPasses && (
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5 }}>
+                            <span style={{ fontSize: 10, color: "var(--dim)" }}>Passes:</span>
+                            {cr.passes.map((p, pi) => (
+                              <span key={pi} title={`Pass ${pi+1}: HTTP ${p.status} (${p.responseTimeMs}ms)`} style={{
+                                display: "inline-flex", alignItems: "center", gap: 3,
+                                fontSize: 10, fontFamily: "var(--font-mono)",
+                                color: p.blocked ? "var(--red)" : p.status === 200 ? "var(--green)" : p.status >= 300 && p.status < 400 ? "var(--orange)" : "var(--dim)",
+                              }}>
+                                <span style={{
+                                  width: 7, height: 7, borderRadius: "50%", display: "inline-block",
+                                  background: p.blocked ? "var(--red)" : p.status === 200 ? "var(--green)" : p.status >= 300 && p.status < 400 ? "var(--orange)" : "var(--dim)",
+                                }} />
+                                {p.status || "ERR"}
+                              </span>
+                            ))}
+                            {inconsistent && <span style={{ fontSize: 10, color: "var(--orange)", marginLeft: 4 }}>{"\u26A0"} inconsistent responses</span>}
+                          </div>
+                        )}
                         {cr.redirectedTo && <div style={{ fontSize: 11, color: "var(--orange)", marginTop: 3, fontFamily: "var(--font-mono)" }}>{"\u21B7"} Redirected to: {trunc(cr.redirectedTo, 60)}</div>}
                         {cr.robotsMeta && <div style={{ fontSize: 11, color: "var(--purple)", marginTop: 3 }}>Meta robots: {cr.robotsMeta}</div>}
                         {cr.specificRobotsMeta && <div style={{ fontSize: 11, color: "var(--purple)", marginTop: 3 }}>Bot-specific meta: {cr.specificRobotsMeta}</div>}
@@ -954,7 +982,8 @@ function CrawlTest({ onResults }) {
                       <Badge color={statusColor(cr)}>HTTP {cr.status || "ERR"}</Badge>
                       <span style={{ fontSize: 11, color: "var(--dim)", fontFamily: "var(--font-mono)", minWidth: 48, textAlign: "right" }}>{cr.responseTimeMs}ms</span>
                     </div>
-                  ))}
+                    );
+                  })}
                 </Section>
 
                 {/* Interpretation */}
@@ -968,11 +997,21 @@ function CrawlTest({ onResults }) {
                     </div>
                   </div>
                 )}
-                {blocked.length === 0 && ok.length === bots.length && (
-                  <div style={{ background: "var(--green-bg)", border: "1px solid rgba(74,222,128,0.2)", borderRadius: 10, padding: "16px 20px", marginTop: 16, borderLeft: "3px solid var(--green)" }}>
-                    <div style={{ fontWeight: 700, color: "var(--green)", marginBottom: 4, fontSize: 13 }}>All crawlers allowed</div>
+                {intermittent.length > 0 && (
+                  <div style={{ background: "var(--orange-bg)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 10, padding: "16px 20px", marginTop: 16, borderLeft: "3px solid var(--orange)" }}>
+                    <div style={{ fontWeight: 700, color: "var(--orange)", marginBottom: 6, fontSize: 13 }}>
+                      {intermittent.length} crawler{intermittent.length > 1 ? "s" : ""} with intermittent responses
+                    </div>
                     <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
-                      All tested LLM crawlers received a 200 response. The server isn't blocking any of them at the HTTP level. Note: this doesn't check robots.txt rules, which some crawlers may still respect.
+                      <strong style={{ color: "var(--text)" }}>{intermittent.map(b => b.name).join(", ")}</strong> received different status codes across 3 passes. This usually means the server's WAF or CDN is applying rate limiting, challenge-based blocking, or probabilistic bot detection. These crawlers may sometimes be able to access the page and sometimes not {"\u2014"} which means LLM visibility is unreliable.
+                    </div>
+                  </div>
+                )}
+                {blocked.length === 0 && intermittent.length === 0 && ok.length === bots.length && (
+                  <div style={{ background: "var(--green-bg)", border: "1px solid rgba(74,222,128,0.2)", borderRadius: 10, padding: "16px 20px", marginTop: 16, borderLeft: "3px solid var(--green)" }}>
+                    <div style={{ fontWeight: 700, color: "var(--green)", marginBottom: 4, fontSize: 13 }}>All crawlers allowed consistently</div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
+                      All tested LLM crawlers received a 200 response across all 3 passes. The server isn't blocking any of them at the HTTP level. Note: this doesn't check robots.txt rules, which some crawlers may still respect.
                     </div>
                   </div>
                 )}
