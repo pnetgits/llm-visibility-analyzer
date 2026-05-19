@@ -1,28 +1,80 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LLM Page Visibility Analyzer</title>
-  <meta name="description" content="See exactly what LLMs can extract from any web page — and what they miss.">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.10/babel.min.js"></script>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #0B0F13; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Page Visibility Analyzer</title>
+<meta name="description" content="See exactly what LLMs can extract from any web page — and what they miss.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0B0F13;
+    --surface: #141A22;
+    --surface2: #1A2130;
+    --border: #252D3A;
+    --border-light: #2E3A4A;
+    --text: #D8DEE9;
+    --muted: #7E8B9E;
+    --dim: #4E5A6E;
+    --accent: #4DA8DA;
+    --accent-dim: rgba(77,168,218,0.09);
+    --green: #4ADE80;
+    --green-bg: rgba(74,222,128,0.07);
+    --red: #F87171;
+    --red-bg: rgba(248,113,113,0.08);
+    --orange: #FBBF24;
+    --orange-bg: rgba(251,191,36,0.07);
+    --purple: #A78BFA;
+    --purple-bg: rgba(167,139,250,0.07);
+    --cyan: #22D3EE;
+    --font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes slideIn { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  .fade-in { animation: fadeIn 0.3s ease-out; }
+  .slide-in { animation: slideIn 0.25s ease-out; }
+  .pulsing { animation: pulse 1.5s ease-in-out infinite; }
+</style>
 </head>
 <body>
-  <div id="root"></div>
-  <script type="text/babel">
-    const { useState, useCallback } = React;
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.9/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useCallback, useRef, useEffect } = React;
 
 /* ═══════════════════════════════════════════════════════════════════
    UTILITY HELPERS
    ═══════════════════════════════════════════════════════════════════ */
 function strip(s) { return (s || "").replace(/\s+/g, " ").trim(); }
-function trunc(s, n = 100) { return !s ? "" : s.length > n ? s.slice(0, n) + "…" : s; }
+function trunc(s, n = 100) { return !s ? "" : s.length > n ? s.slice(0, n) + "\u2026" : s; }
 
 /* ═══════════════════════════════════════════════════════════════════
    PARSERS — extract structured data from a DOM document
@@ -57,7 +109,6 @@ function extractSchema(doc) {
 function extractHeadings(doc) {
   const items = [];
   doc.querySelectorAll("h1,h2,h3,h4,h5,h6").forEach((h) => {
-    // Get only direct text content, not nested style/script blocks
     let text = "";
     h.childNodes.forEach((n) => {
       if (n.nodeType === Node.TEXT_NODE) text += n.textContent;
@@ -66,7 +117,6 @@ function extractHeadings(doc) {
       }
     });
     text = strip(text);
-    // Filter out headings that are clearly CSS/code dumps
     if (text.length > 1 && text.length < 500 && !/\{[^}]*!important/.test(text) && !/border-radius|font-family|background-color/.test(text)) {
       items.push({ level: h.tagName, text });
     }
@@ -149,30 +199,27 @@ function extractDataAttrs(doc) {
 function auditSource(doc, html) {
   const issues = [];
 
-  // 1. onclick-based navigation
   doc.querySelectorAll("[onclick]").forEach((el) => {
     const h = el.getAttribute("onclick") || "";
     if (/navigate|router\.push|location\.href|window\.open|goTo|history\.push/i.test(h)) {
       issues.push({
         severity: "high", type: "fake-link",
-        title: "JS onclick navigation — not a real link",
+        title: "JS onclick navigation \u2014 not a real link",
         detail: `<${el.tagName.toLowerCase()} onclick="${trunc(h,70)}"> "${trunc(strip(el.textContent),50)}"`,
-        why: "LLMs can't execute JavaScript. This navigation only works in a browser — LLMs will never discover the destination URL.",
+        why: "LLMs can't execute JavaScript. This navigation only works in a browser \u2014 LLMs will never discover the destination URL.",
       });
     }
   });
 
-  // 2. React-style onClick navigate patterns in raw HTML
   (html.match(/onClick\s*=\s*\{[^}]*(navigate|router\.push|history\.push)[^}]*\}/gi) || []).forEach((m) => {
     issues.push({
       severity: "high", type: "fake-link",
       title: "React onClick navigation pattern",
       detail: trunc(m, 120),
-      why: "JS framework navigation handler. The URL is embedded in code, not in an <a href> — LLMs won't follow it.",
+      why: "JS framework navigation handler. The URL is embedded in code, not in an <a href> \u2014 LLMs won't follow it.",
     });
   });
 
-  // 3. Buttons with navigation handlers
   doc.querySelectorAll("button[onclick]").forEach((btn) => {
     const h = btn.getAttribute("onclick") || "";
     if (/product|page|link|url|navigate|route/i.test(h)) {
@@ -185,7 +232,6 @@ function auditSource(doc, html) {
     }
   });
 
-  // 4. CSS-hidden links (inline)
   doc.querySelectorAll("a[href]").forEach((a) => {
     const style = (a.getAttribute("style")||"") + " " + (a.parentElement?.getAttribute("style")||"");
     if (/display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0[^.]|height\s*:\s*0[^.]|font-size\s*:\s*0/i.test(style)) {
@@ -198,38 +244,29 @@ function auditSource(doc, html) {
     }
   });
 
-  // 5. Class-based hiding
   doc.querySelectorAll('a[href][aria-hidden="true"]').forEach((a) => {
     const href = a.getAttribute("href") || "";
     if (href && href !== "#") {
       issues.push({
         severity: "low", type: "hidden-link",
-        title: "Link with aria-hidden=\"true\"",
+        title: 'Link with aria-hidden="true"',
         detail: `<a href="${trunc(href,60)}" aria-hidden="true">${trunc(strip(a.textContent),40)}</a>`,
         why: "aria-hidden tells assistive tech to ignore this element. Some LLMs may also skip it.",
       });
     }
   });
 
-  // 6. Noscript content-hiding trick
   doc.querySelectorAll("noscript").forEach((ns) => {
-    const inner = ns.innerHTML || "";
-    if (/display\s*:\s*none/i.test(inner)) {
-      const targetsBroad = /\b(body|html|#root|#app|#__next|main|\.app|\.page|\.content)\b[^{]*\{[^}]*display\s*:\s*none/i.test(inner);
-      const severity = targetsBroad ? "medium" : "low";
-      const selectorMatch = inner.match(/([^{]+)\{[^}]*display\s*:\s*none[^}]*\}/i);
-      const targetSelector = selectorMatch ? selectorMatch[1].trim().slice(0, 80) : "unknown element";
-
+    if (/display\s*:\s*none/i.test(ns.innerHTML)) {
       issues.push({
-        severity, type: "noscript-hide",
-        title: "Noscript block applies display:none when JS is off",
-        detail: `A <noscript> tag hides "${targetSelector}" when JavaScript is disabled.${targetsBroad ? " This targets a page-level container — it may blank out the entire page for no-JS visitors." : " This appears to target a specific element, not the whole page."}`,
-        why: "LLMs don't apply CSS, so this doesn't affect what they can read from the HTML source. However, if you're manually testing by disabling JavaScript in Chrome, this CSS will apply and may make the page look emptier than it actually is for LLMs.",
+        severity: "medium", type: "noscript-hide",
+        title: "Noscript block hides page content when JS is off",
+        detail: "A <noscript> tag contains CSS that hides other page elements when JavaScript is disabled.",
+        why: "This doesn't actually hide content from LLMs (they don't apply CSS). But it makes manual testing misleading.",
       });
     }
   });
 
-  // 7. Invalid URL characters — identify each problematic char specifically
   const badChars = {
     "\u2019": { name: "curly apostrophe (right single quote)", code: "U+2019", fix: "remove or replace with nothing" },
     "\u2018": { name: "curly apostrophe (left single quote)", code: "U+2018", fix: "remove or replace with nothing" },
@@ -239,61 +276,44 @@ function auditSource(doc, html) {
     "\u2013": { name: "en dash", code: "U+2013", fix: "replace with a single hyphen (-)" },
     "\u00A0": { name: "non-breaking space", code: "U+00A0", fix: "replace with a regular hyphen or remove" },
     "\u200B": { name: "zero-width space", code: "U+200B", fix: "remove" },
-    "\u00E9": { name: "accented e (é)", code: "U+00E9", fix: "replace with 'e'" },
-    "\u00E8": { name: "accented è", code: "U+00E8", fix: "replace with 'e'" },
-    "\u00F1": { name: "ñ", code: "U+00F1", fix: "replace with 'n'" },
-    "\u00FC": { name: "ü", code: "U+00FC", fix: "replace with 'u'" },
   };
   const badCharPattern = /[\u2018\u2019\u201C\u201D\u2014\u2013\u00A0\u200B]/;
   doc.querySelectorAll("a[href]").forEach((a) => {
     const href = a.getAttribute("href") || "";
     if (badCharPattern.test(href)) {
-      // Find all bad chars in this URL
       const found = [];
       for (const [char, info] of Object.entries(badChars)) {
-        if (href.includes(char)) {
-          found.push({ char, ...info });
-        }
+        if (href.includes(char)) found.push({ char, ...info });
       }
-      // Build a suggested clean URL
       let cleanHref = href;
       for (const [char, info] of Object.entries(badChars)) {
         if (info.fix.includes("hyphen")) cleanHref = cleanHref.replaceAll(char, "-");
         else cleanHref = cleanHref.replaceAll(char, "");
       }
-      // Remove consecutive hyphens and trailing hyphens from slug
       cleanHref = cleanHref.replace(/-{2,}/g, "-").replace(/-\//g, "/").replace(/\/-/g, "/");
-
-      // Build highlighted href showing problem chars
       let highlighted = href;
-      for (const f of found) {
-        highlighted = highlighted.replaceAll(f.char, `→ ${f.char} ←`);
-      }
-
-      const charList = found.map(f => `"${f.char}" — ${f.name} (${f.code}) — ${f.fix}`).join("\n");
-
+      for (const f of found) highlighted = highlighted.replaceAll(f.char, `\u2192 ${f.char} \u2190`);
+      const charList = found.map(f => `"${f.char}" \u2014 ${f.name} (${f.code}) \u2014 ${f.fix}`).join("\n");
       issues.push({
         severity: "high", type: "invalid-url",
         title: `Link URL contains invalid character${found.length > 1 ? "s" : ""}: ${found.map(f => f.name).join(", ")}`,
         detail: `href="${trunc(highlighted, 140)}"\n\nProblem character${found.length > 1 ? "s" : ""}:\n${charList}\n\nSuggested clean URL: ${trunc(cleanHref, 120)}`,
-        why: `The character ${found.map(f => `"${f.char}" (${f.name})`).join(" and ")} is not a valid URL character. It requires percent-encoding to resolve (e.g. ' becomes %E2%80%99) and most servers won't match this to a real page. LLMs and search engine crawlers will likely get a 404 or fail to follow the link. The slug should be sanitised to remove or replace these characters.`,
+        why: `The character ${found.map(f => `"${f.char}" (${f.name})`).join(" and ")} is not a valid URL character. LLMs and crawlers will likely get a 404.`,
       });
     }
   });
 
-  // 8. Empty JS containers
   doc.querySelectorAll('[data-react-root],[id="root"],[id="app"],[id="__next"],[data-controller],[data-component]').forEach((el) => {
     if (strip(el.textContent).length < 20) {
       issues.push({
         severity: "medium", type: "empty-container",
         title: "Empty JS application container",
-        detail: `<${el.tagName.toLowerCase()} id="${el.id||""}" class="${trunc(el.className,50)}"> — ${strip(el.textContent).length} chars of content`,
+        detail: `<${el.tagName.toLowerCase()} id="${el.id||""}" class="${trunc(el.className,50)}"> \u2014 ${strip(el.textContent).length} chars of content`,
         why: "This container is likely populated by JavaScript after page load. Any content rendered inside it will be invisible to LLMs.",
       });
     }
   });
 
-  // 9. Links only in JSON (not as real <a href>)
   const jsonLinkRe = /"(?:href|url|link|productLink|slug)"\s*:\s*"(\/[^"]+)"/g;
   let jm;
   const flaggedJsonLinks = new Set();
@@ -305,13 +325,12 @@ function auditSource(doc, html) {
       issues.push({
         severity: "medium", type: "json-only-link",
         title: "URL in JSON data but no matching crawlable link",
-        detail: `URL: ${trunc(url,80)} — found in JSON but no <a href> equivalent`,
+        detail: `URL: ${trunc(url,80)} \u2014 found in JSON but no <a href> equivalent`,
         why: "This URL exists in embedded data but not as a real hyperlink. LLMs may read the JSON but won't recognise it as a navigable link.",
       });
     }
   }
 
-  // 10. Consent / cookie gated content patterns
   doc.querySelectorAll('[class*="cookie"],[class*="consent"],[class*="gdpr"],[id*="cookie"],[id*="consent"]').forEach((el) => {
     const text = strip(el.textContent);
     if (text.length > 50) {
@@ -319,12 +338,11 @@ function auditSource(doc, html) {
         severity: "low", type: "consent-content",
         title: "Content inside cookie/consent wrapper",
         detail: `<${el.tagName.toLowerCase()} class="${trunc(el.className,50)}"> contains ${text.length} chars`,
-        why: "Content inside consent-gated containers may not be accessible to all crawlers depending on how the consent flow is implemented.",
+        why: "Content inside consent-gated containers may not be accessible to all crawlers.",
       });
     }
   });
 
-  // 11. Images set via data-background-image (JS required)
   doc.querySelectorAll("[data-background-image],[data-bg],[data-src-bg],[data-bg-src]").forEach((el) => {
     const bgUrl = el.getAttribute("data-background-image") || el.getAttribute("data-bg") || el.getAttribute("data-src-bg") || el.getAttribute("data-bg-src") || "";
     if (bgUrl) {
@@ -337,7 +355,6 @@ function auditSource(doc, html) {
     }
   });
 
-  // 12. Links with rel="nofollow"
   const nofollowLinks = [];
   doc.querySelectorAll('a[rel*="nofollow"]').forEach((a) => {
     const href = a.getAttribute("href") || "";
@@ -348,104 +365,83 @@ function auditSource(doc, html) {
     issues.push({
       severity: "low", type: "nofollow-links",
       title: `${nofollowLinks.length} link(s) with rel="nofollow"`,
-      detail: nofollowLinks.slice(0, 5).map(l => `${trunc(l.href,50)} — "${trunc(l.text,30)}"`).join(" | ") + (nofollowLinks.length > 5 ? ` … and ${nofollowLinks.length - 5} more` : ""),
-      why: "Links with rel=\"nofollow\" tell search engines not to pass link equity. LLMs can still read and follow them, but Googlebot treats them as hints not to crawl.",
+      detail: nofollowLinks.slice(0, 5).map(l => `${trunc(l.href,50)} \u2014 "${trunc(l.text,30)}"`).join(" | "),
+      why: 'Links with rel="nofollow" tell search engines not to pass link equity.',
     });
   }
 
-  // 13. Third-party widget placeholders (empty until JS loads external scripts)
-  doc.querySelectorAll('[class*="trustpilot"],[data-businessunit-id],[class*="yotpo"],[class*="bazaarvoice"],[class*="review"],[id*="disqus"],[class*="elfsight"],[class*="feefo"],[data-feefo]').forEach((el) => {
+  doc.querySelectorAll('[class*="trustpilot"],[data-businessunit-id],[class*="yotpo"],[class*="bazaarvoice"],[class*="review"],[id*="disqus"],[class*="elfsight"]').forEach((el) => {
     const text = strip(el.textContent);
     if (text.length < 30) {
-      const cn = (el.className || "").toLowerCase();
-      const id = (el.id || "").toLowerCase();
-      const widgetName = cn.includes("trustpilot") || el.hasAttribute("data-businessunit-id") ? "Trustpilot" :
-        cn.includes("yotpo") ? "Yotpo" :
-        cn.includes("bazaarvoice") ? "Bazaarvoice" :
-        cn.includes("feefo") || el.hasAttribute("data-feefo") ? "Feefo" :
-        id.includes("disqus") ? "Disqus" :
-        cn.includes("elfsight") ? "Elfsight" : "Third-party";
+      const widgetName = el.className?.includes("trustpilot") ? "Trustpilot" :
+        el.className?.includes("yotpo") ? "Yotpo" :
+        el.className?.includes("bazaarvoice") ? "Bazaarvoice" :
+        el.id?.includes("disqus") ? "Disqus" : "Third-party widget";
       issues.push({
         severity: "medium", type: "widget-placeholder",
         title: `${widgetName} widget placeholder (empty until JS loads)`,
-        detail: `<${el.tagName.toLowerCase()} class="${trunc(el.className,60)}"> — ${text.length} chars of content`,
-        why: `This ${widgetName} widget is an empty container that gets populated by external JavaScript. Reviews, ratings, and UGC content loaded this way are completely invisible to LLMs.`,
+        detail: `<${el.tagName.toLowerCase()} class="${trunc(el.className,60)}"> \u2014 ${text.length} chars of content`,
+        why: `This ${widgetName} widget is an empty container populated by external JavaScript. Reviews, ratings, and UGC loaded this way are invisible to LLMs.`,
       });
     }
   });
 
-  // 14. Images with only data-src (no real src) — lazy-load without fallback
-  const lazySrcImages = [];
   doc.querySelectorAll("img[data-src]:not([src])").forEach((img) => {
     const dataSrc = img.getAttribute("data-src") || "";
-    const alt = img.getAttribute("alt") || "";
-    lazySrcImages.push({ dataSrc, alt });
-  });
-  if (lazySrcImages.length > 0) {
-    const withAlt = lazySrcImages.filter(i => i.alt.length > 0).length;
-    const withoutAlt = lazySrcImages.length - withAlt;
-    const example = lazySrcImages[0];
     issues.push({
-      severity: "low", type: "lazy-no-src",
-      title: `${lazySrcImages.length} image(s) use data-src without a src attribute (JS lazy-load)`,
-      detail: `Example: <img data-src="${trunc(example.dataSrc,70)}"${example.alt ? ` alt="${trunc(example.alt,40)}"` : ""}>\n\n${withAlt} image(s) have alt text, ${withoutAlt} do not.\n\n` +
-        (lazySrcImages.length > 1 ? `All ${lazySrcImages.length} images:\n` + lazySrcImages.map((img, i) => `${i+1}. data-src="${trunc(img.dataSrc,60)}" ${img.alt ? `alt="${trunc(img.alt,30)}"` : "— no alt"}`).join("\n") : ""),
-      why: `These images use a JS-based lazy-load pattern: the URL is in data-src instead of src, so they only load when JavaScript swaps it in. LLMs won't load the images themselves, but that's rarely an issue since they read alt text, not pixels.${withoutAlt > 0 ? ` However, ${withoutAlt} of these images also have no alt text — LLMs have zero information about those.` : " All of these have alt text, so LLMs can still understand what each image represents."} For crawlability, consider using native <img src="url" loading="lazy"> instead — same performance benefit, no JS dependency.`,
-      count: 1,
+      severity: "medium", type: "lazy-no-src",
+      title: "Image with data-src but no src attribute",
+      detail: `<img data-src="${trunc(dataSrc,70)}"> \u2014 requires JS to load`,
+      why: "This image has no src attribute \u2014 only data-src which requires JavaScript to swap in.",
     });
-  }
+  });
 
-  // 15. Bazaarvoice review widgets (uses data-bv-show, not class names)
   doc.querySelectorAll("[data-bv-show],[data-bv-product-id]").forEach((el) => {
     const bvType = el.getAttribute("data-bv-show") || "reviews";
     const text = strip(el.textContent);
     if (text.length < 50) {
       issues.push({
         severity: "high", type: "widget-placeholder",
-        title: `Bazaarvoice "${bvType}" widget (empty — requires JS to load)`,
-        detail: `<${el.tagName.toLowerCase()} data-bv-show="${bvType}"> — ${text.length} chars of content. Review ratings, counts, and UGC will not be visible.`,
-        why: "Bazaarvoice review widgets are empty placeholder elements that get populated by external JavaScript. Aggregate ratings, review counts, and all user-generated review content loaded this way are completely invisible to LLMs. This means LLMs cannot see social proof, star ratings, or review text for this product.",
+        title: `Bazaarvoice "${bvType}" widget (empty \u2014 requires JS to load)`,
+        detail: `<${el.tagName.toLowerCase()} data-bv-show="${bvType}"> \u2014 ${text.length} chars of content.`,
+        why: "Bazaarvoice review widgets are empty placeholder elements populated by external JavaScript. All review content is invisible to LLMs.",
       });
     }
   });
 
-  // 16. "Read more" / truncated content patterns
   doc.querySelectorAll('[class*="read-more"],[class*="readmore"],[class*="show-more"],[class*="showmore"],[data-readmore],[class*="truncat"],[class*="text-clamp"],[class*="line-clamp"],[class*="ellipsis"]').forEach((el) => {
     const text = strip(el.textContent);
     if (text.length > 20) {
       issues.push({
         severity: "medium", type: "truncated-content",
-        title: "Content behind a \"read more\" / truncation pattern",
-        detail: `<${el.tagName.toLowerCase()} class="${trunc(el.className,60)}"> — visible text: "${trunc(text,80)}"`,
-        why: "This content appears to use a \"read more\" expand pattern. LLMs will only see the truncated/visible portion. If the full content is in the HTML but hidden via CSS, LLMs may still read it — but if JS is needed to load the rest, the expanded content will be invisible.",
+        title: 'Content behind a "read more" / truncation pattern',
+        detail: `<${el.tagName.toLowerCase()} class="${trunc(el.className,60)}"> \u2014 visible text: "${trunc(text,80)}"`,
+        why: 'This content uses a "read more" expand pattern. LLMs will only see the truncated/visible portion.',
       });
     }
   });
-  // Also check for CSS-based truncation via inline styles
   doc.querySelectorAll('[style*="line-clamp"],[style*="webkit-line-clamp"],[style*="max-height"][style*="overflow"]').forEach((el) => {
     const text = strip(el.textContent);
     if (text.length > 30) {
       issues.push({
         severity: "low", type: "truncated-content",
-        title: "Content visually truncated via CSS (line-clamp or overflow hidden)",
-        detail: `<${el.tagName.toLowerCase()} style="${trunc(el.getAttribute("style"),60)}"> — ${text.length} chars of text`,
-        why: "This content is being visually truncated via CSS. The good news: the full text IS in the HTML, so LLMs can read it. But users may not see it all without interaction.",
+        title: "Content visually truncated via CSS",
+        detail: `<${el.tagName.toLowerCase()} style="${trunc(el.getAttribute("style"),60)}"> \u2014 ${text.length} chars of text`,
+        why: "This content is visually truncated via CSS. The full text IS in the HTML, so LLMs can read it.",
       });
     }
   });
 
-  // 17. Video/iframe embeds that may need JS
   doc.querySelectorAll("iframe[data-src]:not([src]), [data-video-url], [data-video-id], [class*='video-placeholder'], [class*='video-container']:empty").forEach((el) => {
     const videoUrl = el.getAttribute("data-src") || el.getAttribute("data-video-url") || el.getAttribute("data-video-id") || "";
     issues.push({
       severity: "medium", type: "js-video",
       title: "Video embed requires JS to load",
-      detail: `<${el.tagName.toLowerCase()} ${videoUrl ? `data-src="${trunc(videoUrl,60)}"` : `class="${trunc(el.className,60)}"`}> — video content won't be visible to LLMs`,
-      why: "This video element needs JavaScript to initialise. LLMs won't see the video content, any transcript, or associated metadata unless it's also provided as text in the HTML.",
+      detail: `<${el.tagName.toLowerCase()} ${videoUrl ? `data-src="${trunc(videoUrl,60)}"` : `class="${trunc(el.className,60)}"`}>`,
+      why: "This video element needs JavaScript to initialise. LLMs won't see the video content.",
     });
   });
 
-  // 18. Empty content sections likely populated by JS (generic pattern)
   doc.querySelectorAll("[data-component],[data-widget],[data-module],[data-carousel],[data-slider],[data-recommendations]").forEach((el) => {
     const text = strip(el.textContent);
     const tagName = el.tagName.toLowerCase();
@@ -453,25 +449,22 @@ function auditSource(doc, html) {
       const componentName = el.getAttribute("data-component") || el.getAttribute("data-widget") || el.getAttribute("data-module") || el.getAttribute("data-carousel") || el.getAttribute("data-slider") || el.getAttribute("data-recommendations") || "unknown";
       issues.push({
         severity: "medium", type: "empty-widget",
-        title: `Empty JS component: "${trunc(componentName,40)}" (requires JS to populate)`,
-        detail: `<${tagName} data-component="${trunc(componentName,50)}"> — ${text.length} chars of content`,
-        why: "This looks like a JavaScript component placeholder that gets populated after page load. Cross-sell carousels, recommendation widgets, and dynamic content sections loaded this way are invisible to LLMs.",
+        title: `Empty JS component: "${trunc(componentName,40)}"`,
+        detail: `<${tagName} data-component="${trunc(componentName,50)}"> \u2014 ${text.length} chars of content`,
+        why: "This JavaScript component placeholder gets populated after page load. Content loaded this way is invisible to LLMs.",
       });
     }
   });
 
-  // ── Deduplicate issues: group by type + core detail, show count ──
+  // Deduplicate
   const deduped = [];
   const seen = new Map();
   for (const issue of issues) {
-    // Build a dedup key from type + the most identifying part of the detail
     let key = issue.type + "|";
     if (issue.type === "invalid-url") {
-      // Key on the href value
       const hrefMatch = issue.detail.match(/href="([^"]+)"/);
       key += hrefMatch ? hrefMatch[1] : issue.detail;
     } else if (issue.type === "fake-link" || issue.type === "hidden-link") {
-      // Key on the href or onclick content
       const hrefMatch = issue.detail.match(/href="([^"]+)"/) || issue.detail.match(/onclick="([^"]+)"/);
       key += hrefMatch ? hrefMatch[1] : issue.detail;
     } else if (issue.type === "js-image") {
@@ -482,47 +475,27 @@ function auditSource(doc, html) {
     } else {
       key += issue.detail;
     }
-
-    if (seen.has(key)) {
-      seen.get(key).count += 1;
-    } else {
-      const entry = { ...issue, count: 1 };
-      seen.set(key, entry);
-      deduped.push(entry);
-    }
+    if (seen.has(key)) { seen.get(key).count += 1; }
+    else { const entry = { ...issue, count: 1 }; seen.set(key, entry); deduped.push(entry); }
   }
-
   return deduped;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   LAYER 3 — MEANINGFUL DIFF (source vs rendered)
+   LAYER 3 — MEANINGFUL DIFF
    ═══════════════════════════════════════════════════════════════════ */
 function computeDiff(src, ren) {
   if (!ren) return null;
-
-  // Normalize URLs for comparison — strip domain, trailing slash, lowercase
   const normUrl = (href) => {
-    let u = (href || "").trim();
-    // Strip protocol + domain to get path
-    u = u.replace(/^https?:\/\/[^\/]+/i, "");
-    // Remove trailing slash (but not if it's just "/")
+    let u = (href || "").trim().replace(/^https?:\/\/[^\/]+/i, "");
     if (u.length > 1 && u.endsWith("/")) u = u.slice(0, -1);
-    // Remove common tracking params
     u = u.replace(/[?&](utm_[^&=]+=|ref=|source=|fbclid=|gclid=|mc_[^&=]+=)[^&]*/gi, "");
-    // Clean up leftover ? or &
-    u = u.replace(/\?$/, "").replace(/\?&/, "?");
-    return u.toLowerCase();
+    return u.replace(/\?$/, "").replace(/\?&/, "?").toLowerCase();
   };
-
-  // Normalize image src similarly
   const normImg = (src) => {
-    let u = (src || "").trim();
-    u = u.replace(/^https?:\/\/[^\/]+/i, "");
-    // Strip common image sizing params
+    let u = (src || "").trim().replace(/^https?:\/\/[^\/]+/i, "");
     u = u.replace(/[?&](w|h|width|height|size|resize|quality|q|format|f)=[^&]*/gi, "");
-    u = u.replace(/\?$/, "");
-    return u.toLowerCase();
+    return u.replace(/\?$/, "").toLowerCase();
   };
 
   const srcTexts = new Set(src.text.map(t => t.text));
@@ -537,182 +510,45 @@ function computeDiff(src, ren) {
   const addedSchema = ren.schema.filter(s => !srcSchemaKeys.has(JSON.stringify(s.parsed?.["@type"] || s.raw)));
   const addedImages = ren.images.filter(i => !srcImgs.has(normImg(i.src)));
 
-  // ── Aggressive noise filtering ──
-  // Browser extensions
-  const extRe = /chrome-extension:\/\/|moz-extension:\/\/|safari-extension:\/\/|ms-browser-extension:\/\//i;
-  // Tracking & analytics
-  const trackRe = /gtm|analytics|tracking|dataLayer|fbq|_ga|cookie|gorgias|ometria|widget|rollbar|bat\.bing\.com|doubleclick|facebook\.com\/tr|google-analytics|googletagmanager|hotjar|clarity\.ms|hubspot|pardot|marketo|segment\.io|mixpanel|amplitude|optimizely|crazyegg|mouseflow/i;
-  // Browser TTS / extension UI patterns
-  const ttsRe = /^🇺🇸|^🇬🇧|^🏴|Microsoft\s+(David|George|Hazel|Mark|Susan|Zira|Haruka|Helena)|Google\s+(US|UK|Australian)|text.to.speech|reader.?mode|OpenDyslexic/i;
-  const extUiRe = /chrome-extension|moz-extension|readermode\.io|Settings\s*page|Share\s*to\s*a\s*new\s*group|Default\s*translation\s*language|Automatically\s*activate\s*Reader/i;
+  const extRe = /chrome-extension:\/\/|moz-extension:\/\//i;
+  const trackRe = /gtm|analytics|tracking|dataLayer|fbq|_ga|cookie|gorgias|ometria|widget|rollbar|doubleclick|google-analytics|googletagmanager|hotjar|clarity\.ms|hubspot|segment\.io|mixpanel|amplitude/i;
+  const ttsRe = /^🇺🇸|^🇬🇧|Microsoft\s+(David|George|Hazel)|Google\s+(US|UK)|text.to.speech|reader.?mode|OpenDyslexic/i;
+  const extUiRe = /chrome-extension|moz-extension|readermode\.io|Settings\s*page|Share\s*to\s*a\s*new\s*group|Default\s*translation\s*language/i;
 
-  addedText = addedText.filter(t => {
-    if (t.text.length < 20) return false;
-    if (trackRe.test(t.text)) return false;
-    if (ttsRe.test(t.text)) return false;
-    if (extUiRe.test(t.text)) return false;
-    return true;
-  });
-  addedLinks = addedLinks.filter(l => {
-    if (extRe.test(l.href)) return false;
-    if (trackRe.test(l.href)) return false;
-    if (l.href.startsWith("data:") || l.href.startsWith("blob:") || l.href.startsWith("#/")) return false;
-    if (/readermode\.io|chrome\.google\.com\/webstore/i.test(l.href)) return false;
-    return true;
-  });
-  let addedImgs = addedImages.filter(i => {
-    if (extRe.test(i.src)) return false;
-    if (trackRe.test(i.src)) return false;
-    if (i.src.startsWith("data:") || i.src.startsWith("blob:")) return false;
-    return true;
-  });
+  addedText = addedText.filter(t => t.text.length >= 20 && !trackRe.test(t.text) && !ttsRe.test(t.text) && !extUiRe.test(t.text));
+  addedLinks = addedLinks.filter(l => !extRe.test(l.href) && !trackRe.test(l.href) && !l.href.startsWith("data:") && !l.href.startsWith("blob:") && !l.href.startsWith("#/") && !/readermode\.io|chrome\.google\.com\/webstore/i.test(l.href));
+  let addedImgs = addedImages.filter(i => !extRe.test(i.src) && !trackRe.test(i.src) && !i.src.startsWith("data:") && !i.src.startsWith("blob:"));
 
   return {
-    text: addedText,
-    links: addedLinks,
+    text: addedText, links: addedLinks,
     headings: addedHeadings.filter(h => !extUiRe.test(h.text) && !ttsRe.test(h.text)),
-    schema: addedSchema,
-    images: addedImgs,
+    schema: addedSchema, images: addedImgs,
   };
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   LAYER 4 — PROMOTE DIFF FINDINGS TO ISSUES
-   When the diff reveals important JS-only content, create issues.
+   LAYER 4 — PROMOTE DIFF TO ISSUES
    ═══════════════════════════════════════════════════════════════════ */
 function promoteDiffToIssues(diff) {
   if (!diff) return [];
   const issues = [];
-
-  // ── JS-only product links (high severity) ──
   const productLinks = diff.links.filter(l => /\/product[s]?\//i.test(l.href));
-  if (productLinks.length > 0) {
-    const preview = productLinks.slice(0, 5).map(l => `${trunc(l.href,60)} — "${trunc(l.text,40)}"`).join("\n");
-    const full = productLinks.length > 5
-      ? `\n\n── All ${productLinks.length} links ──\n` + productLinks.map((l, i) => `${i+1}. ${trunc(l.href,70)} — "${trunc(l.text,50)}"`).join("\n")
-      : "";
-    issues.push({
-      severity: "high", type: "js-only-product-links",
-      title: `${productLinks.length} product link(s) only load via JavaScript`,
-      detail: preview + full,
-      why: "These product links (cross-sells, \"complete the look\", \"you may also like\") are completely invisible to LLMs. This means internal link equity is not passed, and LLMs cannot discover these related products from this page.",
-      count: 1,
-    });
-  }
-
-  // ── JS-only non-product content links (medium) ──
-  const contentLinks = diff.links.filter(l => !(/\/product[s]?\//i.test(l.href)) && !(/youtube|instagram|twitter|facebook|strava|komoot|tiktok|pinterest|linkedin/i.test(l.href)));
-  if (contentLinks.length > 0) {
-    const preview = contentLinks.slice(0, 5).map(l => `${trunc(l.href,60)} — "${trunc(l.text,40)}"`).join("\n");
-    const full = contentLinks.length > 5
-      ? `\n\n── All ${contentLinks.length} links ──\n` + contentLinks.map((l, i) => `${i+1}. ${trunc(l.href,70)} — "${trunc(l.text,50)}"`).join("\n")
-      : "";
-    issues.push({
-      severity: "medium", type: "js-only-content-links",
-      title: `${contentLinks.length} content link(s) only load via JavaScript`,
-      detail: preview + full,
-      why: "These internal/content links are only in the rendered DOM. LLMs won't discover these pages from here, reducing crawlability and internal linking value.",
-      count: 1,
-    });
-  }
-
-  // ── JS-only social links (low) ──
-  const socialLinks = diff.links.filter(l => /youtube|instagram|twitter|facebook|strava|komoot|tiktok|pinterest|linkedin/i.test(l.href));
-  if (socialLinks.length > 0) {
-    issues.push({
-      severity: "low", type: "js-only-social-links",
-      title: `${socialLinks.length} social media link(s) only load via JavaScript`,
-      detail: socialLinks.map(l => trunc(l.href,60)).join("\n"),
-      why: "Social profile links are JS-only. Low impact for LLM visibility but means social signals aren't associated with the page in the initial HTML.",
-      count: 1,
-    });
-  }
-
-  // ── JS-only headings — severity based on level ──
-  const highHeadings = diff.headings.filter(h => h.level === "H1" || h.level === "H2");
-  const medHeadings = diff.headings.filter(h => h.level !== "H1" && h.level !== "H2");
-
-  if (highHeadings.length > 0) {
-    issues.push({
-      severity: "high", type: "js-only-headings-high",
-      title: `${highHeadings.length} key heading(s) (${highHeadings.map(h => h.level).join(", ")}) only exist after JavaScript runs`,
-      detail: highHeadings.map(h => `${h.level}: "${trunc(h.text,60)}"`).join("\n"),
-      why: "H1 and H2 headings are typically used for major page sections, so any that only appear after JavaScript runs are worth reviewing. Some may be critical content headings (product names, feature sections, reviews) that LLMs will miss entirely. Others may be functional UI labels (\"Search results\", \"Filter by\") which matter less. Check whether these headings help an LLM understand what the page is about — if they do, they should be in the source HTML.",
-      count: 1,
-    });
-  }
-  if (medHeadings.length > 0) {
-    issues.push({
-      severity: "medium", type: "js-only-headings-med",
-      title: `${medHeadings.length} sub-heading(s) (${[...new Set(medHeadings.map(h => h.level))].join(", ")}) only exist after JavaScript runs`,
-      detail: medHeadings.map(h => `${h.level}: "${trunc(h.text,60)}"`).join("\n"),
-      why: "Sub-headings that only appear after JS execution indicate content subsections invisible to LLMs. Less critical than H1/H2 but still represents missing content structure.",
-      count: 1,
-    });
-  }
-
-  // ── JS-only meaningful text (medium — indicates missing body content) ──
-  // Filter to only longer, meaningful text blocks
-  const meaningfulText = diff.text.filter(t => t.text.length > 30);
-  if (meaningfulText.length > 0) {
-    // Try to categorise
-    const productText = meaningfulText.filter(t => /price|£|\$|€|add to|basket|cart|delivery|stock|size/i.test(t.text));
-    const otherText = meaningfulText.filter(t => !/price|£|\$|€|add to|basket|cart|delivery|stock|size/i.test(t.text));
-
-    if (productText.length > 0) {
-      const preview = productText.slice(0, 5).map(t => `"${trunc(t.text,80)}"`).join("\n");
-      const full = productText.length > 5
-        ? `\n\n── All ${productText.length} blocks ──\n` + productText.map((t, i) => `${i+1}. "${trunc(t.text,100)}"`).join("\n")
-        : "";
-      issues.push({
-        severity: "high", type: "js-only-product-content",
-        title: `${productText.length} product-related text block(s) only load via JavaScript`,
-        detail: preview + full,
-        why: "Product information like prices, availability, descriptions, and calls-to-action are only in the rendered DOM. LLMs cannot see this product content, which impacts how they understand and represent this product.",
-        count: 1,
-      });
-    }
-    if (otherText.length > 3) {
-      const preview = otherText.slice(0, 5).map(t => `"${trunc(t.text,80)}"`).join("\n");
-      const full = otherText.length > 5
-        ? `\n\n── All ${otherText.length} blocks ──\n` + otherText.map((t, i) => `${i+1}. "${trunc(t.text,100)}"`).join("\n")
-        : "";
-      issues.push({
-        severity: "medium", type: "js-only-text-content",
-        title: `${otherText.length} text content block(s) only load via JavaScript`,
-        detail: preview + full,
-        why: "Meaningful text content that only appears after JS execution is invisible to LLMs. This could include feature descriptions, editorial content, or other important page information.",
-        count: 1,
-      });
-    }
-  }
-
-  // ── JS-only schema (high — structured data invisible to LLMs) ──
-  if (diff.schema.length > 0) {
-    issues.push({
-      severity: "high", type: "js-only-schema",
-      title: `${diff.schema.length} structured data block(s) only exist after JavaScript runs`,
-      detail: diff.schema.map(s => `@type: ${s.parsed?.["@type"] || "unknown"}`).join("\n"),
-      why: "JSON-LD structured data that's injected by JavaScript is invisible to LLMs fetching the raw HTML. If this includes Product schema, Review schema, or other rich data, it won't be available for LLM retrieval or rich results.",
-      count: 1,
-    });
-  }
-
-  // ── JS-only images (medium if significant count) ──
-  if (diff.images.length > 3) {
-    const preview = diff.images.slice(0, 5).map(i => `${trunc(i.src,60)} — alt: "${trunc(i.alt,30) || "none"}"`).join("\n");
-    const full = diff.images.length > 5
-      ? `\n\n── All ${diff.images.length} images ──\n` + diff.images.map((i, idx) => `${idx+1}. ${trunc(i.src,70)} — alt: "${trunc(i.alt,30) || "none"}"`).join("\n")
-      : "";
-    issues.push({
-      severity: "medium", type: "js-only-images",
-      title: `${diff.images.length} image(s) only load via JavaScript`,
-      detail: preview + full,
-      why: "These images only appear after JavaScript runs. If these are product images, they are invisible to LLMs and won't be associated with the product in AI-generated responses.",
-      count: 1,
-    });
-  }
-
+  if (productLinks.length > 0) issues.push({ severity: "high", type: "js-only-product-links", title: `${productLinks.length} product link(s) only load via JavaScript`, detail: productLinks.slice(0,8).map(l => `${trunc(l.href,60)} \u2014 "${trunc(l.text,40)}"`).join("\n"), why: "These product links are completely invisible to LLMs.", count: 1 });
+  const contentLinks = diff.links.filter(l => !(/\/product[s]?\//i.test(l.href)) && !(/youtube|instagram|twitter|facebook|tiktok|pinterest|linkedin/i.test(l.href)));
+  if (contentLinks.length > 0) issues.push({ severity: "medium", type: "js-only-content-links", title: `${contentLinks.length} content link(s) only load via JavaScript`, detail: contentLinks.slice(0,6).map(l => `${trunc(l.href,60)} \u2014 "${trunc(l.text,40)}"`).join("\n"), why: "These internal/content links are only in the rendered DOM. LLMs won't discover these pages.", count: 1 });
+  const socialLinks = diff.links.filter(l => /youtube|instagram|twitter|facebook|tiktok|pinterest|linkedin/i.test(l.href));
+  if (socialLinks.length > 0) issues.push({ severity: "low", type: "js-only-social-links", title: `${socialLinks.length} social link(s) only load via JavaScript`, detail: socialLinks.map(l => trunc(l.href,60)).join("\n"), why: "Social profile links are JS-only. Low impact.", count: 1 });
+  const highH = diff.headings.filter(h => h.level === "H1" || h.level === "H2");
+  if (highH.length > 0) issues.push({ severity: "high", type: "js-only-headings-high", title: `${highH.length} key heading(s) only exist after JavaScript runs`, detail: highH.map(h => `${h.level}: "${trunc(h.text,60)}"`).join("\n"), why: "H1/H2 headings invisible to LLMs means major page sections are missing.", count: 1 });
+  const medH = diff.headings.filter(h => h.level !== "H1" && h.level !== "H2");
+  if (medH.length > 0) issues.push({ severity: "medium", type: "js-only-headings-med", title: `${medH.length} sub-heading(s) only exist after JavaScript runs`, detail: medH.map(h => `${h.level}: "${trunc(h.text,60)}"`).join("\n"), why: "Sub-headings that only appear after JS execution.", count: 1 });
+  const mt = diff.text.filter(t => t.text.length > 30);
+  const pt = mt.filter(t => /price|£|\$|€|add to|basket|cart|delivery|stock|size/i.test(t.text));
+  const ot = mt.filter(t => !/price|£|\$|€|add to|basket|cart|delivery|stock|size/i.test(t.text));
+  if (pt.length > 0) issues.push({ severity: "high", type: "js-only-product-content", title: `${pt.length} product-related text block(s) only load via JavaScript`, detail: pt.slice(0,5).map(t => `"${trunc(t.text,80)}"`).join("\n"), why: "Product information only in rendered DOM. LLMs cannot see it.", count: 1 });
+  if (ot.length > 3) issues.push({ severity: "medium", type: "js-only-text-content", title: `${ot.length} text block(s) only load via JavaScript`, detail: ot.slice(0,5).map(t => `"${trunc(t.text,80)}"`).join("\n"), why: "Text content only appears after JS execution.", count: 1 });
+  if (diff.schema.length > 0) issues.push({ severity: "high", type: "js-only-schema", title: `${diff.schema.length} structured data block(s) only exist after JavaScript runs`, detail: diff.schema.map(s => `@type: ${s.parsed?.["@type"] || "unknown"}`).join("\n"), why: "JSON-LD injected by JavaScript is invisible to LLMs.", count: 1 });
+  if (diff.images.length > 3) issues.push({ severity: "medium", type: "js-only-images", title: `${diff.images.length} image(s) only load via JavaScript`, detail: diff.images.slice(0,5).map(i => `${trunc(i.src,60)} \u2014 alt: "${trunc(i.alt,30) || "none"}"`).join("\n"), why: "These images only appear after JavaScript runs.", count: 1 });
   return issues;
 }
 
@@ -728,7 +564,6 @@ function analyze(sourceHtml, renderedHtml) {
     dataAttrs: extractDataAttrs(sourceDoc),
   };
   const issues = auditSource(sourceDoc, sourceHtml);
-
   let renderedData = null, diff = null;
   if (renderedHtml?.trim().length > 100) {
     const renderedDoc = parseDoc(renderedHtml);
@@ -739,92 +574,429 @@ function analyze(sourceHtml, renderedHtml) {
       dataAttrs: extractDataAttrs(renderedDoc),
     };
     diff = computeDiff(sourceData, renderedData);
-
-    // Promote significant diff findings to issues
-    const diffIssues = promoteDiffToIssues(diff);
-    issues.push(...diffIssues);
+    issues.push(...promoteDiffToIssues(diff));
   }
-
   return { sourceData, renderedData, issues, diff };
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   DESIGN TOKENS
-   ═══════════════════════════════════════════════════════════════════ */
-const C = {
-  bg: "#0B0F13", surface: "#141A22", surface2: "#1A2130", border: "#252D3A",
-  borderLight: "#2E3A4A", text: "#D8DEE9", muted: "#7E8B9E", dim: "#4E5A6E",
-  accent: "#4DA8DA", accentDim: "#4DA8DA18",
-  green: "#4ADE80", greenBg: "#4ADE8012", red: "#F87171", redBg: "#F8717114",
-  orange: "#FBBF24", orangeBg: "#FBBF2412", purple: "#A78BFA", purpleBg: "#A78BFA12",
-  cyan: "#22D3EE",
-};
-
-/* ═══════════════════════════════════════════════════════════════════
-   COLLAPSIBLE SECTION
+   UI COMPONENTS
    ═══════════════════════════════════════════════════════════════════ */
 function Section({ title, count, children, defaultOpen = false, tagText, tagColor }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div style={{ marginBottom: 14 }}>
+    <div style={{ marginBottom: 14 }} className="fade-in">
       <button onClick={() => setOpen(!open)} style={{
         display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
-        padding: "11px 16px", background: C.surface2, border: `1px solid ${C.border}`,
-        borderRadius: open ? "8px 8px 0 0" : 8, color: C.text, fontFamily: "inherit",
-        fontSize: 12.5, fontWeight: 600, cursor: "pointer", borderBottom: open ? "none" : undefined,
+        padding: "12px 18px", background: "var(--surface2)", border: "1px solid var(--border)",
+        borderRadius: open ? "10px 10px 0 0" : 10, color: "var(--text)", fontFamily: "var(--font-body)",
+        fontSize: 13, fontWeight: 600, cursor: "pointer", borderBottom: open ? "none" : undefined,
       }}>
-        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ color: C.dim, fontSize: 9, transition: "transform 0.2s", transform: open ? "rotate(90deg)" : "none", display: "inline-block" }}>▶</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ color: "var(--dim)", fontSize: 9, transition: "transform 0.2s", transform: open ? "rotate(90deg)" : "none", display: "inline-block" }}>{"\u25B6"}</span>
           {title}
-          {tagText && <span style={{
-            fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 20,
-            background: (tagColor || C.accent) + "20", color: tagColor || C.accent,
-            letterSpacing: "0.03em",
-          }}>{tagText}</span>}
+          {tagText && <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 10px", borderRadius: 20, background: (tagColor || "var(--accent)") + "20", color: tagColor || "var(--accent)", letterSpacing: "0.03em" }}>{tagText}</span>}
         </span>
-        <span style={{ fontSize: 11, color: C.dim, fontWeight: 400 }}>{count !== undefined ? `${count} items` : ""}</span>
+        <span style={{ fontSize: 11, color: "var(--dim)", fontWeight: 400 }}>{count !== undefined ? `${count} items` : ""}</span>
       </button>
-      {open && (
-        <div style={{ border: `1px solid ${C.border}`, borderTop: "none", borderRadius: "0 0 8px 8px", overflow: "hidden" }}>
-          {children}
+      {open && <div style={{ border: "1px solid var(--border)", borderTop: "none", borderRadius: "0 0 10px 10px", overflow: "hidden" }} className="slide-in">{children}</div>}
+    </div>
+  );
+}
+
+function Row({ children, cols = "1fr", highlight }) {
+  return <div style={{ display: "grid", gridTemplateColumns: cols, gap: 10, padding: "9px 18px", borderBottom: "1px solid var(--border)", fontSize: 13, alignItems: "start", background: highlight || "transparent" }}>{children}</div>;
+}
+
+function Badge({ children, color = "var(--accent)" }) {
+  return <span style={{ display: "inline-block", padding: "2px 10px", borderRadius: 20, fontSize: 10, fontWeight: 700, background: color + "20", color, letterSpacing: "0.03em", whiteSpace: "nowrap", fontFamily: "var(--font-mono)" }}>{children}</span>;
+}
+
+function Empty({ children }) {
+  return <div style={{ padding: "36px 20px", textAlign: "center", color: "var(--dim)", fontSize: 13 }}>{children}</div>;
+}
+
+const sevColor = (s) => s === "high" ? "var(--red)" : s === "medium" ? "var(--orange)" : s === "info" ? "var(--accent)" : "var(--muted)";
+
+/* ═══════════════════════════════════════════════════════════════════
+   HELP GUIDE
+   ═══════════════════════════════════════════════════════════════════ */
+function HelpGuide({ onClose }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, backdropFilter: "blur(4px)" }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, maxWidth: 680, width: "100%", maxHeight: "80vh", overflow: "auto", padding: "32px 36px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+          <h2 style={{ fontSize: 20, fontWeight: 700 }}>How to Use This Tool</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 22, cursor: "pointer", padding: 4 }}>{"\u00D7"}</button>
+        </div>
+        <div style={{ fontSize: 14, color: "var(--muted)", lineHeight: 1.8 }}>
+          <h3 style={{ color: "var(--accent)", fontSize: 16, fontWeight: 700, marginBottom: 8, marginTop: 0 }}>Page Analysis</h3>
+          <p style={{ marginBottom: 12 }}>Paste in a page's source HTML to see what LLMs can extract from it. Optionally add the rendered DOM (from DevTools) to compare what's in the raw HTML vs what only loads after JavaScript runs.</p>
+          <p style={{ marginBottom: 6 }}><strong style={{ color: "var(--text)" }}>Source HTML:</strong> Right-click page {"\u2192"} View Page Source (Ctrl+U / Cmd+U). Select all, copy, paste.</p>
+          <p style={{ marginBottom: 16 }}><strong style={{ color: "var(--text)" }}>Rendered DOM:</strong> DevTools (F12) {"\u2192"} Elements tab {"\u2192"} right-click <code style={{ background: "var(--surface2)", padding: "1px 6px", borderRadius: 3, color: "var(--purple)", fontSize: 12, fontFamily: "var(--font-mono)" }}>&lt;html&gt;</code> {"\u2192"} Copy outerHTML.</p>
+
+          <h3 style={{ color: "var(--cyan)", fontSize: 16, fontWeight: 700, marginBottom: 8 }}>Crawl Test</h3>
+          <p style={{ marginBottom: 12 }}>Enter a URL to test whether different LLM crawlers can actually access the page. This sends real HTTP requests using each crawler's user-agent string and shows you the response status for each one.</p>
+          <p style={{ marginBottom: 8 }}>This feature requires a small proxy service (Cloudflare Worker) because browsers can't send requests with custom user agents. If you haven't set this up yet, the tool will show you how.</p>
+
+          <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "14px 16px", marginTop: 16, borderLeft: "3px solid var(--accent)" }}>
+            <strong style={{ color: "var(--accent)" }}>Tip:</strong> Start with the Crawl Test to check if pages are accessible, then use Page Analysis to dig into what content LLMs can actually see.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   COPY REPORT
+   ═══════════════════════════════════════════════════════════════════ */
+function generateReport(r, crawlResults) {
+  const lines = [];
+  lines.push("LLM VISIBILITY REPORT");
+  lines.push("=".repeat(50));
+  lines.push("");
+
+  if (r) {
+    const hc = r.issues.filter(i => i.severity === "high").length;
+    const mc = r.issues.filter(i => i.severity === "medium").length;
+    const lc = r.issues.filter(i => i.severity === "low").length;
+    lines.push("PAGE ANALYSIS SUMMARY");
+    lines.push(`  High issues: ${hc}`);
+    lines.push(`  Medium issues: ${mc}`);
+    lines.push(`  Low issues: ${lc}`);
+    lines.push(`  Crawlable links: ${r.sourceData.links.length}`);
+    lines.push(`  Schema blocks: ${r.sourceData.schema.length}`);
+    lines.push(`  Headings: ${r.sourceData.headings.length}`);
+    lines.push("");
+    if (r.issues.length > 0) {
+      lines.push("ISSUES");
+      lines.push("-".repeat(50));
+      for (const issue of r.issues) {
+        lines.push(`[${issue.severity.toUpperCase()}] ${issue.title}${issue.count > 1 ? ` (\u00D7${issue.count})` : ""}`);
+        lines.push(`  ${issue.detail.split("\n")[0]}`);
+        lines.push(`  Why: ${issue.why}`);
+        lines.push("");
+      }
+    }
+  }
+
+  if (crawlResults) {
+    lines.push("");
+    lines.push("CRAWL TEST RESULTS");
+    lines.push("=".repeat(50));
+    lines.push(`URL: ${crawlResults.url}`);
+    lines.push(`Tested: ${crawlResults.testedAt}`);
+    lines.push("");
+    const baseline = crawlResults.results.find(r => r.isBaseline);
+    if (baseline) lines.push(`Baseline (Chrome): ${baseline.status} ${baseline.statusText}`);
+    lines.push("");
+    for (const cr of crawlResults.results.filter(cr => !cr.isBaseline)) {
+      const icon = cr.blocked ? "BLOCKED" : cr.status === 200 ? "OK" : cr.status === 0 ? "ERROR" : `${cr.status}`;
+      lines.push(`[${icon}] ${cr.name} (${cr.org}) \u2014 HTTP ${cr.status} ${cr.statusText || ""} \u2014 ${cr.responseTimeMs}ms`);
+      if (cr.redirectedTo) lines.push(`  Redirected to: ${cr.redirectedTo}`);
+      if (cr.robotsMeta) lines.push(`  Meta robots: ${cr.robotsMeta}`);
+      if (cr.error) lines.push(`  Error: ${cr.error}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   CRAWL TEST COMPONENT
+   ═══════════════════════════════════════════════════════════════════ */
+const WORKER_URL_KEY = "llm-analyzer-worker-url";
+
+function CrawlTest({ onResults }) {
+  const [workerUrl, setWorkerUrl] = useState(() => {
+    try { return localStorage.getItem(WORKER_URL_KEY) || ""; } catch { return ""; }
+  });
+  const [testUrl, setTestUrl] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [results, setResults] = useState(null);
+  const [error, setError] = useState("");
+  const [showSetup, setShowSetup] = useState(false);
+  const [copyMsg, setCopyMsg] = useState("");
+
+  const saveWorkerUrl = useCallback((url) => {
+    setWorkerUrl(url);
+    try { localStorage.setItem(WORKER_URL_KEY, url); } catch {}
+  }, []);
+
+  const runTest = useCallback(async () => {
+    if (!testUrl.trim() || !workerUrl.trim()) return;
+    setLoading(true);
+    setError("");
+    setResults(null);
+
+    let url = testUrl.trim();
+    if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
+
+    try {
+      const resp = await fetch(workerUrl.replace(/\/$/, "") + "/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.error || `Worker returned HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      setResults(data);
+      if (onResults) onResults(data);
+    } catch (err) {
+      if (err.message.includes("Failed to fetch") || err.message.includes("NetworkError")) {
+        setError("Can't reach the worker. Check the URL is correct and the worker is deployed.");
+      } else {
+        setError(err.message);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [testUrl, workerUrl, onResults]);
+
+  const copyCrawlReport = useCallback(() => {
+    if (!results) return;
+    const text = generateReport(null, results);
+    navigator.clipboard.writeText(text).then(() => {
+      setCopyMsg("Copied!");
+      setTimeout(() => setCopyMsg(""), 2000);
+    });
+  }, [results]);
+
+  const statusColor = (r) => {
+    if (r.blocked) return "var(--red)";
+    if (r.status === 200) return "var(--green)";
+    if (r.status >= 300 && r.status < 400) return "var(--orange)";
+    if (r.status === 0) return "var(--dim)";
+    return "var(--red)";
+  };
+
+  const statusIcon = (r) => {
+    if (r.blocked) return "\u2717";
+    if (r.status === 200) return "\u2713";
+    if (r.status >= 300 && r.status < 400) return "\u21B7";
+    if (r.status === 0) return "?";
+    return "\u2717";
+  };
+
+  const hasWorker = workerUrl.trim().length > 0;
+
+  return (
+    <div>
+      {/* Worker URL setup — shown when no URL saved */}
+      {!hasWorker && !showSetup && (
+        <div className="fade-in" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "28px 32px", marginBottom: 24, borderLeft: "3px solid var(--cyan)" }}>
+          <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 8, color: "var(--cyan)" }}>Setup Required</h3>
+          <p style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.7, marginBottom: 16 }}>
+            The crawl test needs a small proxy service to send requests with different user agents. This is a free Cloudflare Worker that takes about 5 minutes to set up.
+          </p>
+          <button onClick={() => setShowSetup(true)} style={{
+            background: "var(--cyan)", color: "var(--bg)", border: "none", borderRadius: 8,
+            padding: "10px 24px", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-body)", cursor: "pointer",
+          }}>Show Setup Guide</button>
+        </div>
+      )}
+
+      {/* Setup guide */}
+      {showSetup && (
+        <div className="fade-in" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "28px 32px", marginBottom: 24 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <h3 style={{ fontSize: 16, fontWeight: 700, color: "var(--cyan)" }}>Cloudflare Worker Setup</h3>
+            {hasWorker && <button onClick={() => setShowSetup(false)} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 18, cursor: "pointer" }}>{"\u00D7"}</button>}
+          </div>
+          <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.9 }}>
+            <p style={{ marginBottom: 12 }}><strong style={{ color: "var(--text)" }}>1.</strong> Go to <a href="https://dash.cloudflare.com" target="_blank" rel="noopener" style={{ color: "var(--cyan)" }}>dash.cloudflare.com</a> and create a free account (or log in)</p>
+            <p style={{ marginBottom: 12 }}><strong style={{ color: "var(--text)" }}>2.</strong> Click <strong style={{ color: "var(--text)" }}>Workers & Pages</strong> in the left sidebar, then <strong style={{ color: "var(--text)" }}>Create</strong></p>
+            <p style={{ marginBottom: 12 }}><strong style={{ color: "var(--text)" }}>3.</strong> Choose <strong style={{ color: "var(--text)" }}>Create Worker</strong>, name it <code style={{ background: "var(--surface2)", padding: "2px 8px", borderRadius: 4, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--cyan)" }}>llm-crawl-tester</code>, click <strong style={{ color: "var(--text)" }}>Deploy</strong></p>
+            <p style={{ marginBottom: 12 }}><strong style={{ color: "var(--text)" }}>4.</strong> Click <strong style={{ color: "var(--text)" }}>Edit Code</strong>, delete everything in the editor, and paste the worker code from the <code style={{ background: "var(--surface2)", padding: "2px 8px", borderRadius: 4, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--cyan)" }}>worker.js</code> file</p>
+            <p style={{ marginBottom: 12 }}><strong style={{ color: "var(--text)" }}>5.</strong> Click <strong style={{ color: "var(--text)" }}>Deploy</strong> again</p>
+            <p style={{ marginBottom: 16 }}><strong style={{ color: "var(--text)" }}>6.</strong> Copy the worker URL (looks like <code style={{ background: "var(--surface2)", padding: "2px 8px", borderRadius: 4, fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--cyan)" }}>https://llm-crawl-tester.yourname.workers.dev</code>) and paste it below:</p>
+          </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <input
+              type="url" value={workerUrl} onChange={e => saveWorkerUrl(e.target.value)}
+              placeholder="https://llm-crawl-tester.yourname.workers.dev"
+              style={{
+                flex: 1, padding: "10px 14px", background: "var(--surface2)", border: "1px solid var(--border)",
+                borderRadius: 8, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, outline: "none",
+              }}
+              onFocus={e => e.target.style.borderColor = "var(--cyan)"}
+              onBlur={e => e.target.style.borderColor = "var(--border)"}
+            />
+            {hasWorker && <button onClick={() => setShowSetup(false)} style={{
+              background: "var(--cyan)", color: "var(--bg)", border: "none", borderRadius: 8,
+              padding: "10px 20px", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-body)", cursor: "pointer",
+            }}>Done</button>}
+          </div>
+        </div>
+      )}
+
+      {/* URL input + test button */}
+      {hasWorker && !showSetup && (
+        <div className="fade-in">
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 8 }}>
+            <input
+              type="url" value={testUrl} onChange={e => setTestUrl(e.target.value)}
+              placeholder="Enter a URL to test (e.g. https://example.com/page)"
+              onKeyDown={e => e.key === "Enter" && runTest()}
+              style={{
+                flex: 1, padding: "12px 16px", background: "var(--surface)", border: "1px solid var(--border)",
+                borderRadius: 10, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 13, outline: "none",
+              }}
+              onFocus={e => e.target.style.borderColor = "var(--cyan)"}
+              onBlur={e => e.target.style.borderColor = "var(--border)"}
+            />
+            <button onClick={runTest} disabled={loading || !testUrl.trim()} style={{
+              background: (!loading && testUrl.trim()) ? "var(--cyan)" : "var(--dim)",
+              color: "var(--bg)", border: "none", borderRadius: 10, padding: "12px 28px",
+              fontSize: 14, fontWeight: 700, fontFamily: "var(--font-body)",
+              cursor: (!loading && testUrl.trim()) ? "pointer" : "default", whiteSpace: "nowrap",
+            }}>{loading ? "Testing\u2026" : "Test Crawlers"}</button>
+          </div>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 20 }}>
+            <button onClick={() => setShowSetup(true)} style={{
+              background: "none", border: "none", color: "var(--dim)", fontSize: 11, cursor: "pointer",
+              fontFamily: "var(--font-body)", padding: "2px 0",
+            }}>Change worker URL</button>
+            {results && (
+              <button onClick={copyCrawlReport} style={{
+                background: "none", border: "1px solid var(--border)", borderRadius: 8,
+                color: copyMsg ? "var(--green)" : "var(--muted)", fontSize: 12, cursor: "pointer",
+                fontFamily: "var(--font-body)", padding: "4px 14px", fontWeight: 600,
+              }}>{copyMsg || "Copy Results"}</button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Loading */}
+      {loading && (
+        <div className="fade-in" style={{ padding: "40px 20px", textAlign: "center" }}>
+          <div style={{ display: "inline-block", width: 28, height: 28, border: "3px solid var(--border)", borderTopColor: "var(--cyan)", borderRadius: "50%", animation: "spin 0.8s linear infinite", marginBottom: 12 }} />
+          <p style={{ color: "var(--muted)", fontSize: 13 }}>Testing with 13 different user agents{"\u2026"}</p>
+        </div>
+      )}
+
+      {/* Error */}
+      {error && (
+        <div className="fade-in" style={{ background: "var(--red-bg)", border: "1px solid var(--red)", borderRadius: 10, padding: "14px 18px", marginBottom: 20 }}>
+          <strong style={{ color: "var(--red)" }}>Error:</strong>
+          <span style={{ color: "var(--muted)", marginLeft: 8, fontSize: 13 }}>{error}</span>
+        </div>
+      )}
+
+      {/* Results */}
+      {results && !loading && (
+        <div className="fade-in">
+          {(() => {
+            const baseline = results.results.find(r => r.isBaseline);
+            const bots = results.results.filter(r => !r.isBaseline);
+            const blocked = bots.filter(r => r.blocked);
+            const ok = bots.filter(r => r.status === 200);
+            const redirected = bots.filter(r => r.status >= 300 && r.status < 400);
+            const errored = bots.filter(r => r.status === 0);
+            const other = bots.filter(r => !r.blocked && r.status !== 200 && !(r.status >= 300 && r.status < 400) && r.status !== 0);
+
+            return (
+              <>
+                {/* Summary cards */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12, marginBottom: 24 }}>
+                  {[
+                    { n: ok.length, label: "Allowed", color: ok.length > 0 ? "var(--green)" : "var(--dim)" },
+                    { n: blocked.length, label: "Blocked (403)", color: blocked.length > 0 ? "var(--red)" : "var(--green)" },
+                    { n: redirected.length, label: "Redirected", color: redirected.length > 0 ? "var(--orange)" : "var(--dim)" },
+                    { n: errored.length + other.length, label: "Errors / Other", color: (errored.length + other.length) > 0 ? "var(--orange)" : "var(--dim)" },
+                  ].map((card, i) => (
+                    <div key={i} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", borderLeft: `3px solid ${card.color}` }}>
+                      <div style={{ fontSize: 24, fontWeight: 700, color: card.color, fontFamily: "var(--font-mono)" }}>{card.n}</div>
+                      <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 3, fontWeight: 600 }}>{card.label}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Baseline */}
+                {baseline && (
+                  <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 18px", marginBottom: 16, display: "flex", alignItems: "center", gap: 14 }}>
+                    <span style={{ fontSize: 18, color: statusColor(baseline) }}>{statusIcon(baseline)}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13 }}>Baseline: Chrome Browser</div>
+                      <div style={{ fontSize: 12, color: "var(--dim)" }}>Standard browser request {"\u2014"} this is what we compare all bots against</div>
+                    </div>
+                    <Badge color={statusColor(baseline)}>HTTP {baseline.status}</Badge>
+                    <span style={{ fontSize: 11, color: "var(--dim)", fontFamily: "var(--font-mono)" }}>{baseline.responseTimeMs}ms</span>
+                  </div>
+                )}
+
+                {/* Bot results */}
+                <Section title="Crawler Results" count={bots.length} defaultOpen tagText={blocked.length > 0 ? `${blocked.length} blocked` : "all clear"} tagColor={blocked.length > 0 ? "var(--red)" : "var(--green)"}>
+                  {bots.map((cr, i) => (
+                    <div key={i} style={{
+                      display: "grid", gridTemplateColumns: "32px 1fr auto auto",
+                      gap: 14, padding: "12px 18px", alignItems: "center",
+                      borderBottom: "1px solid var(--border)",
+                      background: cr.blocked ? "var(--red-bg)" : "transparent",
+                    }}>
+                      <span style={{ fontSize: 18, color: statusColor(cr), textAlign: "center" }}>{statusIcon(cr)}</span>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+                          {cr.name}
+                          <span style={{ fontSize: 11, color: "var(--dim)", fontWeight: 400 }}>{cr.org}</span>
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 2 }}>{cr.description}</div>
+                        {cr.redirectedTo && <div style={{ fontSize: 11, color: "var(--orange)", marginTop: 3, fontFamily: "var(--font-mono)" }}>{"\u21B7"} Redirected to: {trunc(cr.redirectedTo, 60)}</div>}
+                        {cr.robotsMeta && <div style={{ fontSize: 11, color: "var(--purple)", marginTop: 3 }}>Meta robots: {cr.robotsMeta}</div>}
+                        {cr.specificRobotsMeta && <div style={{ fontSize: 11, color: "var(--purple)", marginTop: 3 }}>Bot-specific meta: {cr.specificRobotsMeta}</div>}
+                        {cr.error && <div style={{ fontSize: 11, color: "var(--red)", marginTop: 3 }}>{cr.timeout ? "Request timed out (15s)" : cr.error}</div>}
+                      </div>
+                      <Badge color={statusColor(cr)}>HTTP {cr.status || "ERR"}</Badge>
+                      <span style={{ fontSize: 11, color: "var(--dim)", fontFamily: "var(--font-mono)", minWidth: 48, textAlign: "right" }}>{cr.responseTimeMs}ms</span>
+                    </div>
+                  ))}
+                </Section>
+
+                {/* Interpretation */}
+                {blocked.length > 0 && (
+                  <div style={{ background: "var(--red-bg)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: 10, padding: "16px 20px", marginTop: 16, borderLeft: "3px solid var(--red)" }}>
+                    <div style={{ fontWeight: 700, color: "var(--red)", marginBottom: 6, fontSize: 13 }}>
+                      {blocked.length} crawler{blocked.length > 1 ? "s" : ""} blocked
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
+                      These bots received a 403 (Forbidden) response: <strong style={{ color: "var(--text)" }}>{blocked.map(b => b.name).join(", ")}</strong>. This means these AI systems cannot access this page at all. This is typically caused by the server's WAF or CDN blocking known bot user agents, or by rules in the site's web server configuration.
+                    </div>
+                  </div>
+                )}
+                {blocked.length === 0 && ok.length === bots.length && (
+                  <div style={{ background: "var(--green-bg)", border: "1px solid rgba(74,222,128,0.2)", borderRadius: 10, padding: "16px 20px", marginTop: 16, borderLeft: "3px solid var(--green)" }}>
+                    <div style={{ fontWeight: 700, color: "var(--green)", marginBottom: 4, fontSize: 13 }}>All crawlers allowed</div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
+                      All tested LLM crawlers received a 200 response. The server isn't blocking any of them at the HTTP level. Note: this doesn't check robots.txt rules, which some crawlers may still respect.
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
     </div>
   );
 }
 
-function Row({ children, cols = "1fr", highlight }) {
-  return (
-    <div style={{
-      display: "grid", gridTemplateColumns: cols, gap: 10, padding: "8px 16px",
-      borderBottom: `1px solid ${C.border}`, fontSize: 12, alignItems: "start",
-      background: highlight || "transparent",
-    }}>{children}</div>
-  );
-}
-
-function Badge({ children, color = C.accent }) {
-  return (
-    <span style={{
-      display: "inline-block", padding: "2px 8px", borderRadius: 20, fontSize: 10,
-      fontWeight: 700, background: color + "20", color, letterSpacing: "0.03em",
-      whiteSpace: "nowrap",
-    }}>{children}</span>
-  );
-}
-
-function Empty({ children }) {
-  return <div style={{ padding: "30px 20px", textAlign: "center", color: C.dim, fontSize: 12 }}>{children}</div>;
-}
-
 /* ═══════════════════════════════════════════════════════════════════
    MAIN APP
    ═══════════════════════════════════════════════════════════════════ */
 function App() {
+  const [mode, setMode] = useState("analysis");
   const [sourceHtml, setSourceHtml] = useState("");
   const [renderedHtml, setRenderedHtml] = useState("");
   const [results, setResults] = useState(null);
   const [tab, setTab] = useState("audit");
+  const [showHelp, setShowHelp] = useState(false);
+  const [copyMsg, setCopyMsg] = useState("");
+  const [crawlResults, setCrawlResults] = useState(null);
 
   const run = useCallback(() => {
     if (!sourceHtml.trim()) return;
@@ -834,347 +1006,249 @@ function App() {
 
   const clear = useCallback(() => { setSourceHtml(""); setRenderedHtml(""); setResults(null); }, []);
 
+  const copyReport = useCallback(() => {
+    if (!results) return;
+    const text = generateReport(results, crawlResults);
+    navigator.clipboard.writeText(text).then(() => {
+      setCopyMsg("Copied!");
+      setTimeout(() => setCopyMsg(""), 2000);
+    });
+  }, [results, crawlResults]);
+
   const r = results;
   const highCount = r?.issues.filter(i => i.severity === "high").length || 0;
   const medCount = r?.issues.filter(i => i.severity === "medium").length || 0;
-  const infoCount = r?.issues.filter(i => i.severity === "info").length || 0;
   const lowCount = r?.issues.filter(i => i.severity === "low").length || 0;
-  const totalIssues = (highCount + medCount + lowCount);
+  const totalIssues = highCount + medCount + lowCount;
   const hasDiff = !!r?.diff;
   const diffTotal = hasDiff ? (r.diff.text.length + r.diff.links.length + r.diff.headings.length + r.diff.schema.length + r.diff.images.length) : 0;
 
-  const sevColor = (s) => s === "high" ? C.red : s === "medium" ? C.orange : s === "info" ? C.accent : C.muted;
-
   return (
-    <div style={{ background: C.bg, color: C.text, minHeight: "100vh", fontFamily: "'SF Mono','Fira Code','JetBrains Mono',Consolas,monospace", fontSize: 13, lineHeight: 1.55 }}>
+    <div>
+      {showHelp && <HelpGuide onClose={() => setShowHelp(false)} />}
 
-      {/* ── HEADER ── */}
-      <div style={{ borderBottom: `1px solid ${C.border}`, padding: "18px 24px", background: C.surface }}>
-        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-          <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0, letterSpacing: "-0.02em", display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ color: C.accent, fontSize: 20 }}>◈</span>
-            LLM Page Visibility Analyzer
-          </h1>
-          <p style={{ fontSize: 11.5, color: C.muted, marginTop: 4, marginBottom: 0 }}>
-            See exactly what LLMs can extract from any web page — and what they miss.
-          </p>
+      {/* HEADER */}
+      <div style={{ borderBottom: "1px solid var(--border)", padding: "20px 28px", background: "var(--surface)" }}>
+        <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: "-0.03em", display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ color: "var(--accent)", fontSize: 24 }}>{"\u25C8"}</span>
+              LLM Visibility Analyzer
+            </h1>
+            <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 4, marginBottom: 0 }}>
+              See what AI systems can extract from your pages {"\u2014"} and whether they can access them at all.
+            </p>
+          </div>
+          <button onClick={() => setShowHelp(true)} style={{
+            background: "var(--surface2)", color: "var(--accent)", border: "1px solid var(--border)",
+            borderRadius: 8, padding: "8px 18px", fontSize: 13, fontWeight: 600,
+            fontFamily: "var(--font-body)", cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
+          }}>
+            <span style={{ fontSize: 16 }}>?</span> How to use
+          </button>
         </div>
       </div>
 
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 20px" }}>
-
-        {/* ── INPUTS ── */}
-        <div style={{ padding: "24px 0 16px" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-
-            {/* Source HTML */}
-            <div style={{ display: "flex", flexDirection: "column" }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: C.accent, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
-                Source HTML <span style={{ color: C.red }}>*</span>
-              </div>
-              <div style={{ fontSize: 11, color: C.dim, marginBottom: 8, lineHeight: 1.6 }}>
-                <strong style={{ color: C.muted }}>How to get this:</strong> Right-click the page → <strong style={{ color: C.muted }}>View Page Source</strong> (Ctrl+U / Cmd+U). Copy the entire content. This is what LLMs see when they fetch a URL.
-              </div>
-              <textarea
-                value={sourceHtml} onChange={e => setSourceHtml(e.target.value)}
-                placeholder="Paste full View Page Source HTML here..."
-                spellCheck={false}
-                style={{
-                  flex: 1, minHeight: 150, background: C.surface, border: `1px solid ${C.border}`,
-                  borderRadius: 8, color: C.text, fontFamily: "inherit", fontSize: 11.5,
-                  padding: 14, resize: "vertical", outline: "none",
-                }}
-                onFocus={e => e.target.style.borderColor = C.accent}
-                onBlur={e => e.target.style.borderColor = C.border}
-              />
-            </div>
-
-            {/* Rendered DOM */}
-            <div style={{ display: "flex", flexDirection: "column" }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: C.purple, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
-                Rendered DOM <span style={{ color: C.dim, fontWeight: 400, textTransform: "none", letterSpacing: "normal", fontSize: 11 }}>(optional — for comparison)</span>
-              </div>
-              <div style={{ fontSize: 11, color: C.dim, marginBottom: 8, lineHeight: 1.6 }}>
-                <strong style={{ color: C.muted }}>How to get this:</strong> Open DevTools (F12) → <strong style={{ color: C.muted }}>Elements</strong> tab → right-click the <code style={{ background: C.surface2, padding: "1px 5px", borderRadius: 3, color: C.purple, fontSize: 10.5 }}>&lt;html&gt;</code> tag → Copy → Copy outerHTML. This is the page after JS has run.
-              </div>
-              <textarea
-                value={renderedHtml} onChange={e => setRenderedHtml(e.target.value)}
-                placeholder="Paste rendered DOM HTML here (optional)..."
-                spellCheck={false}
-                style={{
-                  flex: 1, minHeight: 150, background: C.surface, border: `1px solid ${C.border}`,
-                  borderRadius: 8, color: C.text, fontFamily: "inherit", fontSize: 11.5,
-                  padding: 14, resize: "vertical", outline: "none",
-                }}
-                onFocus={e => e.target.style.borderColor = C.purple}
-                onBlur={e => e.target.style.borderColor = C.border}
-              />
-            </div>
-          </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14 }}>
-            <button onClick={run} disabled={!sourceHtml.trim()} style={{
-              background: sourceHtml.trim() ? C.accent : C.dim, color: C.bg, border: "none",
-              borderRadius: 8, padding: "10px 32px", fontSize: 13, fontWeight: 700,
-              fontFamily: "inherit", cursor: sourceHtml.trim() ? "pointer" : "default",
-              transition: "background 0.15s",
-            }}>Analyze Page</button>
-            {r && <button onClick={clear} style={{
-              background: "transparent", color: C.muted, border: `1px solid ${C.border}`,
-              borderRadius: 8, padding: "9px 20px", fontSize: 12, fontWeight: 600,
-              fontFamily: "inherit", cursor: "pointer",
-            }}>Clear</button>}
-          </div>
+      {/* MODE SWITCHER */}
+      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "20px 24px 0" }}>
+        <div style={{ display: "flex", gap: 4, background: "var(--surface)", borderRadius: 10, padding: 4, border: "1px solid var(--border)", width: "fit-content", marginBottom: 24 }}>
+          {[
+            { id: "analysis", label: "Page Analysis", icon: "\uD83D\uDD0D" },
+            { id: "crawl", label: "Crawl Test", icon: "\uD83E\uDD16" },
+          ].map(m => (
+            <button key={m.id} onClick={() => setMode(m.id)} style={{
+              padding: "9px 20px", fontSize: 13, fontWeight: 600, fontFamily: "var(--font-body)",
+              color: mode === m.id ? "var(--text)" : "var(--dim)",
+              background: mode === m.id ? "var(--surface2)" : "transparent",
+              border: mode === m.id ? "1px solid var(--border)" : "1px solid transparent",
+              borderRadius: 7, cursor: "pointer", transition: "all 0.15s",
+              display: "flex", alignItems: "center", gap: 6,
+            }}>
+              <span style={{ fontSize: 14 }}>{m.icon}</span>
+              {m.label}
+            </button>
+          ))}
         </div>
 
-        {/* ── RESULTS ── */}
-        {r && (
+        {/* ═══ MODE: PAGE ANALYSIS ═══ */}
+        {mode === "analysis" && (
           <>
-            {/* Summary Cards */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 10, padding: "8px 0 20px" }}>
-              {[
-                { n: highCount, label: "High Issues", color: highCount > 0 ? C.red : C.green },
-                { n: medCount, label: "Medium Issues", color: medCount > 0 ? C.orange : C.green },
-                { n: r.sourceData.links.length, label: "Crawlable Links", color: C.accent },
-                { n: r.sourceData.schema.length, label: "Schema Blocks", color: C.purple },
-                { n: r.sourceData.headings.length, label: "Headings", color: C.green },
-                { n: r.sourceData.images.length, label: "Images", color: C.cyan },
-                { n: r.sourceData.text.length, label: "Text Blocks", color: C.text },
-                ...(hasDiff ? [{ n: diffTotal, label: "JS-Only Content", color: diffTotal > 0 ? C.red : C.green }] : []),
-              ].map((card, i) => (
-                <div key={i} style={{
-                  background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8,
-                  padding: "12px 14px", borderLeft: `3px solid ${card.color}`,
-                }}>
-                  <div style={{ fontSize: 22, fontWeight: 700, color: card.color, letterSpacing: "-0.03em" }}>{card.n}</div>
-                  <div style={{ fontSize: 9.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 2 }}>{card.label}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 18 }}>
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+                  Source HTML <span style={{ color: "var(--red)" }}>*</span>
                 </div>
-              ))}
+                <div style={{ fontSize: 12, color: "var(--dim)", marginBottom: 10, lineHeight: 1.7 }}>
+                  Right-click page {"\u2192"} <strong style={{ color: "var(--muted)" }}>View Page Source</strong> (Ctrl+U / Cmd+U). Copy everything.
+                </div>
+                <textarea value={sourceHtml} onChange={e => setSourceHtml(e.target.value)}
+                  placeholder="Paste full View Page Source HTML here..." spellCheck={false}
+                  style={{ flex: 1, minHeight: 160, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, padding: 16, resize: "vertical", outline: "none" }}
+                  onFocus={e => e.target.style.borderColor = "var(--accent)"} onBlur={e => e.target.style.borderColor = "var(--border)"} />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--purple)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+                  Rendered DOM <span style={{ color: "var(--dim)", fontWeight: 400, textTransform: "none", letterSpacing: "normal", fontSize: 12 }}>(optional)</span>
+                </div>
+                <div style={{ fontSize: 12, color: "var(--dim)", marginBottom: 10, lineHeight: 1.7 }}>
+                  DevTools (F12) {"\u2192"} <strong style={{ color: "var(--muted)" }}>Elements</strong> {"\u2192"} right-click <code style={{ background: "var(--surface2)", padding: "1px 6px", borderRadius: 3, color: "var(--purple)", fontSize: 11, fontFamily: "var(--font-mono)" }}>&lt;html&gt;</code> {"\u2192"} Copy outerHTML.
+                </div>
+                <textarea value={renderedHtml} onChange={e => setRenderedHtml(e.target.value)}
+                  placeholder="Paste rendered DOM HTML here (optional)..." spellCheck={false}
+                  style={{ flex: 1, minHeight: 160, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, padding: 16, resize: "vertical", outline: "none" }}
+                  onFocus={e => e.target.style.borderColor = "var(--purple)"} onBlur={e => e.target.style.borderColor = "var(--border)"} />
+              </div>
             </div>
 
-            {/* Tabs */}
-            <div style={{ display: "flex", gap: 0, borderBottom: `1px solid ${C.border}`, marginBottom: 20 }}>
-              {[
-                { id: "audit", label: `Issues & Flags${totalIssues > 0 ? ` (${totalIssues})` : ""}` },
-                { id: "content", label: "LLM Visible Content" },
-                ...(hasDiff ? [{ id: "diff", label: `JS-Only Content${diffTotal > 0 ? ` (${diffTotal})` : ""}` }] : []),
-              ].map(t => (
-                <button key={t.id} onClick={() => setTab(t.id)} style={{
-                  padding: "11px 20px", fontSize: 12, fontWeight: 600, fontFamily: "inherit",
-                  color: tab === t.id ? C.text : C.dim, background: "none", border: "none",
-                  borderBottom: tab === t.id ? `2px solid ${C.accent}` : "2px solid transparent",
-                  cursor: "pointer", transition: "color 0.15s",
-                }}>{t.label}</button>
-              ))}
-            </div>
-
-            {/* ── TAB: AUDIT ── */}
-            {tab === "audit" && (
-              r.issues.length === 0 ? (
-                <Empty><span style={{ fontSize: 22, color: C.green }}>✓</span><p style={{ marginTop: 8 }}>No issues detected. The source HTML looks clean for LLM visibility.</p></Empty>
-              ) : (
-                <Section title="Issues Found" count={r.issues.length} defaultOpen tagText={highCount > 0 ? `${highCount} high` : "clean"} tagColor={highCount > 0 ? C.red : C.green}>
-                  {r.issues.map((issue, i) => (
-                    <div key={i} style={{
-                      display: "grid", gridTemplateColumns: "auto 1fr", gap: 12,
-                      padding: "12px 16px", borderBottom: `1px solid ${C.border}`,
-                      background: issue.severity === "high" ? C.redBg : issue.severity === "medium" ? C.orangeBg : "transparent",
-                    }}>
-                      <Badge color={sevColor(issue.severity)}>{issue.severity}</Badge>
-                      <div>
-                        <div style={{ fontWeight: 600, marginBottom: 3, display: "flex", alignItems: "center", gap: 8 }}>
-                          {issue.title}
-                          {issue.count > 1 && (
-                            <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 7px", borderRadius: 10, background: C.dim + "30", color: C.muted }}>
-                              ×{issue.count} on page
-                            </span>
-                          )}
-                        </div>
-                        <div style={{ fontSize: 11, color: C.muted, wordBreak: "break-all", whiteSpace: "pre-wrap" }}>{issue.detail}</div>
-                        <div style={{
-                          fontSize: 11, color: C.muted, marginTop: 6, padding: "7px 10px",
-                          background: C.surface2, borderRadius: 4, borderLeft: `2px solid ${C.orange}`, lineHeight: 1.6,
-                        }}>
-                          <strong style={{ color: C.orange }}>Why it matters:</strong> {issue.why}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </Section>
-              )
-            )}
-
-            {/* ── TAB: CONTENT ── */}
-            {tab === "content" && (
-              <>
-                <Section title="Meta & OG Tags" count={r.sourceData.meta.length} defaultOpen color={C.accent}>
-                  {r.sourceData.meta.map((m, i) => (
-                    <Row key={i} cols="160px 1fr">
-                      <span style={{ color: C.accent, fontWeight: 600 }}>{m.name}</span>
-                      <span style={{ color: C.muted, wordBreak: "break-all" }}>{trunc(m.content, 200)}</span>
-                    </Row>
-                  ))}
-                  {r.sourceData.meta.length === 0 && <Empty>No meta tags found</Empty>}
-                </Section>
-
-                <Section title="Structured Data (JSON-LD)" count={r.sourceData.schema.length} defaultOpen tagColor={C.purple}>
-                  {r.sourceData.schema.map((s, i) => (
-                    <div key={i} style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}` }}>
-                      {s.error ? (
-                        <span style={{ color: C.red }}>Parse error — {s.raw}</span>
-                      ) : (
-                        <>
-                          <div style={{ fontWeight: 600, marginBottom: 6, color: C.purple }}>@type: {s.parsed?.["@type"] || "unknown"}</div>
-                          <pre style={{ fontSize: 11, color: C.muted, whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0, maxHeight: 200, overflow: "auto" }}>
-                            {JSON.stringify(s.parsed, null, 2)}
-                          </pre>
-                        </>
-                      )}
-                    </div>
-                  ))}
-                  {r.sourceData.schema.length === 0 && <Empty>No JSON-LD structured data found</Empty>}
-                </Section>
-
-                <Section title="Heading Hierarchy" count={r.sourceData.headings.length} defaultOpen={false}>
-                  {r.sourceData.headings.map((h, i) => {
-                    const indent = (parseInt(h.level.replace("H","")) - 1) * 20;
-                    return (
-                      <Row key={i} cols="50px 1fr">
-                        <span style={{ paddingLeft: indent }}><Badge color={h.level === "H1" ? C.accent : C.dim}>{h.level}</Badge></span>
-                        <span style={{ paddingLeft: indent }}>{trunc(h.text, 120)}</span>
-                      </Row>
-                    );
-                  })}
-                  {r.sourceData.headings.length === 0 && <Empty>No headings found</Empty>}
-                </Section>
-
-                <Section title="Crawlable Links" count={r.sourceData.links.length} defaultOpen={false}>
-                  {r.sourceData.links.map((l, i) => (
-                    <Row key={i} cols="1fr 1fr">
-                      <span style={{ color: C.muted, wordBreak: "break-all", fontSize: 11 }}>{trunc(l.href, 80)}</span>
-                      <span style={{ fontSize: 11 }}>{trunc(l.text, 80)}</span>
-                    </Row>
-                  ))}
-                  {r.sourceData.links.length === 0 && <Empty>No crawlable links found — this is a major red flag</Empty>}
-                </Section>
-
-                <Section title="Images" count={r.sourceData.images.length} defaultOpen={false}>
-                  {r.sourceData.images.map((img, i) => (
-                    <Row key={i} cols="1fr 1fr auto">
-                      <span style={{ color: C.muted, wordBreak: "break-all", fontSize: 11 }}>{trunc(img.src, 80)}</span>
-                      <span style={{ fontSize: 11 }}>{img.alt || <span style={{ color: C.red, fontStyle: "italic" }}>missing alt text</span>}</span>
-                      <Badge color={img.hasAlt ? C.green : C.red}>{img.hasAlt ? "alt ✓" : "no alt"}</Badge>
-                    </Row>
-                  ))}
-                  {r.sourceData.images.length === 0 && <Empty>No images found in source</Empty>}
-                </Section>
-
-                <Section title="Text Content Blocks" count={r.sourceData.text.length} defaultOpen={false}>
-                  {r.sourceData.text.map((t, i) => (
-                    <Row key={i} cols="55px 1fr">
-                      <span style={{ fontSize: 10, color: C.dim }}>&lt;{t.tag}&gt;</span>
-                      <span style={{ fontSize: 11, color: C.muted }}>{trunc(t.text, 150)}</span>
-                    </Row>
-                  ))}
-                  {r.sourceData.text.length === 0 && <Empty>No meaningful text content found — this page may be fully JS-rendered</Empty>}
-                </Section>
-
-                <Section title="Data Attributes (JSON)" count={r.sourceData.dataAttrs.length} defaultOpen={false} tagColor={C.purple}>
-                  {r.sourceData.dataAttrs.map((d, i) => (
-                    <div key={i} style={{ padding: "8px 16px", borderBottom: `1px solid ${C.border}` }}>
-                      <span style={{ color: C.accent, fontSize: 11 }}>
-                        &lt;{d.element} <span style={{ color: C.purple }}>{d.attr}</span>&gt;
-                      </span>
-                      <pre style={{ fontSize: 10, color: C.dim, whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "4px 0 0", maxHeight: 100, overflow: "auto" }}>
-                        {JSON.stringify(d.data, null, 2).slice(0, 400)}
-                      </pre>
-                    </div>
-                  ))}
-                  {r.sourceData.dataAttrs.length === 0 && <Empty>No JSON data attributes found</Empty>}
-                </Section>
-              </>
-            )}
-
-            {/* ── TAB: DIFF ── */}
-            {tab === "diff" && hasDiff && (
-              diffTotal === 0 ? (
-                <Empty>
-                  <span style={{ fontSize: 22, color: C.green }}>✓</span>
-                  <p style={{ marginTop: 8 }}>No meaningful content differences found. The source HTML appears to contain all important page content.</p>
-                </Empty>
-              ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
+              <button onClick={run} disabled={!sourceHtml.trim()} style={{
+                background: sourceHtml.trim() ? "var(--accent)" : "var(--dim)", color: "var(--bg)", border: "none",
+                borderRadius: 10, padding: "11px 36px", fontSize: 14, fontWeight: 700,
+                fontFamily: "var(--font-body)", cursor: sourceHtml.trim() ? "pointer" : "default",
+              }}>Analyze Page</button>
+              {r && (
                 <>
-                  <div style={{ padding: "0 0 16px", fontSize: 12, color: C.muted, lineHeight: 1.6 }}>
-                    The following content <strong style={{ color: C.red }}>only exists after JavaScript runs</strong> — LLMs and basic HTTP fetchers will not see it.
-                  </div>
+                  <button onClick={copyReport} style={{
+                    background: "var(--surface2)", color: copyMsg ? "var(--green)" : "var(--muted)",
+                    border: "1px solid var(--border)", borderRadius: 10, padding: "10px 22px",
+                    fontSize: 13, fontWeight: 600, fontFamily: "var(--font-body)", cursor: "pointer",
+                  }}>{copyMsg || "Copy Report"}</button>
+                  <button onClick={clear} style={{
+                    background: "transparent", color: "var(--muted)", border: "1px solid var(--border)",
+                    borderRadius: 10, padding: "10px 22px", fontSize: 13, fontWeight: 600,
+                    fontFamily: "var(--font-body)", cursor: "pointer",
+                  }}>Clear</button>
+                </>
+              )}
+            </div>
 
-                  {r.diff.links.length > 0 && (
-                    <Section title="Links only in rendered DOM (invisible to LLMs)" count={r.diff.links.length} defaultOpen tagText="JS-only" tagColor={C.red}>
-                      {r.diff.links.map((l, i) => (
-                        <Row key={i} cols="1fr 1fr" highlight={C.redBg}>
-                          <span style={{ color: C.red, wordBreak: "break-all", fontSize: 11 }}>{trunc(l.href, 80)}</span>
-                          <span style={{ fontSize: 11, color: C.muted }}>{trunc(l.text, 80)}</span>
-                        </Row>
-                      ))}
-                    </Section>
-                  )}
+            {/* RESULTS */}
+            {r && (
+              <div className="fade-in">
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12, marginBottom: 24 }}>
+                  {[
+                    { n: highCount, label: "High Issues", color: highCount > 0 ? "var(--red)" : "var(--green)" },
+                    { n: medCount, label: "Medium Issues", color: medCount > 0 ? "var(--orange)" : "var(--green)" },
+                    { n: r.sourceData.links.length, label: "Crawlable Links", color: "var(--accent)" },
+                    { n: r.sourceData.schema.length, label: "Schema Blocks", color: "var(--purple)" },
+                    { n: r.sourceData.headings.length, label: "Headings", color: "var(--green)" },
+                    { n: r.sourceData.images.length, label: "Images", color: "var(--cyan)" },
+                    { n: r.sourceData.text.length, label: "Text Blocks", color: "var(--text)" },
+                    ...(hasDiff ? [{ n: diffTotal, label: "JS-Only Content", color: diffTotal > 0 ? "var(--red)" : "var(--green)" }] : []),
+                  ].map((card, i) => (
+                    <div key={i} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", borderLeft: `3px solid ${card.color}` }}>
+                      <div style={{ fontSize: 24, fontWeight: 700, color: card.color, fontFamily: "var(--font-mono)" }}>{card.n}</div>
+                      <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 3, fontWeight: 600 }}>{card.label}</div>
+                    </div>
+                  ))}
+                </div>
 
-                  {r.diff.text.length > 0 && (
-                    <Section title="Text content only in rendered DOM" count={r.diff.text.length} defaultOpen tagText="JS-only" tagColor={C.red}>
-                      {r.diff.text.map((t, i) => (
-                        <Row key={i} cols="55px 1fr" highlight={C.redBg}>
-                          <span style={{ fontSize: 10, color: C.dim }}>&lt;{t.tag}&gt;</span>
-                          <span style={{ fontSize: 11, color: C.red }}>{trunc(t.text, 150)}</span>
-                        </Row>
-                      ))}
-                    </Section>
-                  )}
+                <div style={{ display: "flex", gap: 0, borderBottom: "1px solid var(--border)", marginBottom: 24 }}>
+                  {[
+                    { id: "audit", label: `Issues & Flags${totalIssues > 0 ? ` (${totalIssues})` : ""}` },
+                    { id: "content", label: "What LLMs Can See" },
+                    ...(hasDiff ? [{ id: "diff", label: `JS-Only Content${diffTotal > 0 ? ` (${diffTotal})` : ""}` }] : []),
+                  ].map(t => (
+                    <button key={t.id} onClick={() => setTab(t.id)} style={{
+                      padding: "12px 22px", fontSize: 13, fontWeight: 600, fontFamily: "var(--font-body)",
+                      color: tab === t.id ? "var(--text)" : "var(--dim)", background: "none", border: "none",
+                      borderBottom: tab === t.id ? "2px solid var(--accent)" : "2px solid transparent", cursor: "pointer",
+                    }}>{t.label}</button>
+                  ))}
+                </div>
 
-                  {r.diff.headings.length > 0 && (
-                    <Section title="Headings only in rendered DOM" count={r.diff.headings.length} defaultOpen tagText="JS-only" tagColor={C.red}>
-                      {r.diff.headings.map((h, i) => (
-                        <Row key={i} cols="50px 1fr" highlight={C.redBg}>
-                          <Badge color={C.red}>{h.level}</Badge>
-                          <span style={{ color: C.red }}>{h.text}</span>
-                        </Row>
-                      ))}
-                    </Section>
-                  )}
-
-                  {r.diff.schema.length > 0 && (
-                    <Section title="Structured data only in rendered DOM" count={r.diff.schema.length} defaultOpen tagText="JS-only" tagColor={C.red}>
-                      {r.diff.schema.map((s, i) => (
-                        <div key={i} style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}`, background: C.redBg }}>
-                          <div style={{ color: C.red, fontWeight: 600 }}>@type: {s.parsed?.["@type"] || "unknown"}</div>
+                {tab === "audit" && (
+                  r.issues.length === 0 ? (
+                    <Empty><span style={{ fontSize: 28, color: "var(--green)" }}>{"\u2713"}</span><p style={{ marginTop: 10 }}>No issues detected.</p></Empty>
+                  ) : (
+                    <Section title="Issues Found" count={r.issues.length} defaultOpen tagText={highCount > 0 ? `${highCount} high` : "clean"} tagColor={highCount > 0 ? "var(--red)" : "var(--green)"}>
+                      {r.issues.map((issue, i) => (
+                        <div key={i} style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 14, padding: "14px 18px", borderBottom: "1px solid var(--border)", background: issue.severity === "high" ? "var(--red-bg)" : issue.severity === "medium" ? "var(--orange-bg)" : "transparent" }}>
+                          <Badge color={sevColor(issue.severity)}>{issue.severity}</Badge>
+                          <div>
+                            <div style={{ fontWeight: 600, marginBottom: 4, display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+                              {issue.title}
+                              {issue.count > 1 && <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 8px", borderRadius: 10, background: "var(--dim)30", color: "var(--muted)", fontFamily: "var(--font-mono)" }}>{"\u00D7"}{issue.count}</span>}
+                            </div>
+                            <div style={{ fontSize: 12, color: "var(--muted)", wordBreak: "break-all", whiteSpace: "pre-wrap", fontFamily: "var(--font-mono)", lineHeight: 1.6 }}>{issue.detail}</div>
+                            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, padding: "9px 12px", background: "var(--surface2)", borderRadius: 6, borderLeft: "3px solid var(--orange)", lineHeight: 1.7 }}>
+                              <strong style={{ color: "var(--orange)" }}>Why it matters:</strong> {issue.why}
+                            </div>
+                          </div>
                         </div>
                       ))}
                     </Section>
-                  )}
+                  )
+                )}
 
-                  {r.diff.images.length > 0 && (
-                    <Section title="Images only in rendered DOM" count={r.diff.images.length} defaultOpen={false} tagText="JS-only" tagColor={C.orange}>
-                      {r.diff.images.map((img, i) => (
-                        <Row key={i} cols="1fr 1fr">
-                          <span style={{ color: C.muted, wordBreak: "break-all", fontSize: 11 }}>{trunc(img.src, 80)}</span>
-                          <span style={{ fontSize: 11 }}>{img.alt || <span style={{ color: C.red, fontStyle: "italic" }}>no alt</span>}</span>
-                        </Row>
-                      ))}
+                {tab === "content" && (
+                  <>
+                    <Section title="Meta & OG Tags" count={r.sourceData.meta.length} defaultOpen>
+                      {r.sourceData.meta.map((m, i) => <Row key={i} cols="170px 1fr"><span style={{ color: "var(--accent)", fontWeight: 600, fontFamily: "var(--font-mono)", fontSize: 12 }}>{m.name}</span><span style={{ color: "var(--muted)", wordBreak: "break-all", fontSize: 12 }}>{trunc(m.content, 200)}</span></Row>)}
+                      {r.sourceData.meta.length === 0 && <Empty>No meta tags found</Empty>}
                     </Section>
-                  )}
-                </>
-              )
-            )}
+                    <Section title="Structured Data (JSON-LD)" count={r.sourceData.schema.length} defaultOpen tagColor="var(--purple)">
+                      {r.sourceData.schema.map((s, i) => <div key={i} style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>{s.error ? <span style={{ color: "var(--red)" }}>Parse error {"\u2014"} {s.raw}</span> : <><div style={{ fontWeight: 600, marginBottom: 8, color: "var(--purple)" }}>@type: {s.parsed?.["@type"] || "unknown"}</div><pre style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0, maxHeight: 200, overflow: "auto", fontFamily: "var(--font-mono)" }}>{JSON.stringify(s.parsed, null, 2)}</pre></>}</div>)}
+                      {r.sourceData.schema.length === 0 && <Empty>No JSON-LD structured data found</Empty>}
+                    </Section>
+                    <Section title="Heading Hierarchy" count={r.sourceData.headings.length} defaultOpen={false}>
+                      {r.sourceData.headings.map((h, i) => { const indent = (parseInt(h.level.replace("H","")) - 1) * 22; return <Row key={i} cols="55px 1fr"><span style={{ paddingLeft: indent }}><Badge color={h.level === "H1" ? "var(--accent)" : "var(--dim)"}>{h.level}</Badge></span><span style={{ paddingLeft: indent, fontSize: 13 }}>{trunc(h.text, 120)}</span></Row>; })}
+                      {r.sourceData.headings.length === 0 && <Empty>No headings found</Empty>}
+                    </Section>
+                    <Section title="Crawlable Links" count={r.sourceData.links.length} defaultOpen={false}>
+                      {r.sourceData.links.slice(0, 200).map((l, i) => <Row key={i} cols="1fr 1fr"><span style={{ color: "var(--muted)", wordBreak: "break-all", fontSize: 12, fontFamily: "var(--font-mono)" }}>{trunc(l.href, 80)}</span><span style={{ fontSize: 12 }}>{trunc(l.text, 80)}</span></Row>)}
+                      {r.sourceData.links.length > 200 && <Empty>Showing first 200 of {r.sourceData.links.length}</Empty>}
+                      {r.sourceData.links.length === 0 && <Empty>No crawlable links found</Empty>}
+                    </Section>
+                    <Section title="Images" count={r.sourceData.images.length} defaultOpen={false}>
+                      {r.sourceData.images.slice(0, 100).map((img, i) => <Row key={i} cols="1fr 1fr auto"><span style={{ color: "var(--muted)", wordBreak: "break-all", fontSize: 12, fontFamily: "var(--font-mono)" }}>{trunc(img.src, 80)}</span><span style={{ fontSize: 12 }}>{img.alt || <span style={{ color: "var(--red)", fontStyle: "italic" }}>missing alt text</span>}</span><Badge color={img.hasAlt ? "var(--green)" : "var(--red)"}>{img.hasAlt ? "alt \u2713" : "no alt"}</Badge></Row>)}
+                      {r.sourceData.images.length === 0 && <Empty>No images found</Empty>}
+                    </Section>
+                    <Section title="Text Content Blocks" count={r.sourceData.text.length} defaultOpen={false}>
+                      {r.sourceData.text.slice(0, 100).map((t, i) => <Row key={i} cols="55px 1fr"><span style={{ fontSize: 10, color: "var(--dim)", fontFamily: "var(--font-mono)" }}>&lt;{t.tag}&gt;</span><span style={{ fontSize: 12, color: "var(--muted)" }}>{trunc(t.text, 150)}</span></Row>)}
+                      {r.sourceData.text.length > 100 && <Empty>Showing first 100 of {r.sourceData.text.length}</Empty>}
+                      {r.sourceData.text.length === 0 && <Empty>No text content found</Empty>}
+                    </Section>
+                    <Section title="Data Attributes (JSON)" count={r.sourceData.dataAttrs.length} defaultOpen={false} tagColor="var(--purple)">
+                      {r.sourceData.dataAttrs.slice(0, 50).map((d, i) => <div key={i} style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)" }}><span style={{ color: "var(--accent)", fontSize: 12, fontFamily: "var(--font-mono)" }}>&lt;{d.element} <span style={{ color: "var(--purple)" }}>{d.attr}</span>&gt;</span><pre style={{ fontSize: 11, color: "var(--dim)", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "4px 0 0", maxHeight: 100, overflow: "auto", fontFamily: "var(--font-mono)" }}>{JSON.stringify(d.data, null, 2).slice(0, 400)}</pre></div>)}
+                      {r.sourceData.dataAttrs.length === 0 && <Empty>No JSON data attributes found</Empty>}
+                    </Section>
+                  </>
+                )}
 
-            <div style={{ height: 60 }} />
+                {tab === "diff" && hasDiff && (
+                  diffTotal === 0 ? (
+                    <Empty><span style={{ fontSize: 28, color: "var(--green)" }}>{"\u2713"}</span><p style={{ marginTop: 10 }}>No meaningful differences found.</p></Empty>
+                  ) : (
+                    <>
+                      <div style={{ padding: "0 0 18px", fontSize: 13, color: "var(--muted)", lineHeight: 1.7 }}>
+                        The following content <strong style={{ color: "var(--red)" }}>only exists after JavaScript runs</strong> {"\u2014"} LLMs will not see it.
+                      </div>
+                      {r.diff.links.length > 0 && <Section title="Links only in rendered DOM" count={r.diff.links.length} defaultOpen tagText="JS-only" tagColor="var(--red)">{r.diff.links.slice(0,100).map((l,i) => <Row key={i} cols="1fr 1fr" highlight="var(--red-bg)"><span style={{ color: "var(--red)", wordBreak: "break-all", fontSize: 12, fontFamily: "var(--font-mono)" }}>{trunc(l.href,80)}</span><span style={{ fontSize: 12, color: "var(--muted)" }}>{trunc(l.text,80)}</span></Row>)}</Section>}
+                      {r.diff.text.length > 0 && <Section title="Text only in rendered DOM" count={r.diff.text.length} defaultOpen tagText="JS-only" tagColor="var(--red)">{r.diff.text.slice(0,80).map((t,i) => <Row key={i} cols="55px 1fr" highlight="var(--red-bg)"><span style={{ fontSize: 10, color: "var(--dim)", fontFamily: "var(--font-mono)" }}>&lt;{t.tag}&gt;</span><span style={{ fontSize: 12, color: "var(--red)" }}>{trunc(t.text,150)}</span></Row>)}</Section>}
+                      {r.diff.headings.length > 0 && <Section title="Headings only in rendered DOM" count={r.diff.headings.length} defaultOpen tagText="JS-only" tagColor="var(--red)">{r.diff.headings.map((h,i) => <Row key={i} cols="55px 1fr" highlight="var(--red-bg)"><Badge color="var(--red)">{h.level}</Badge><span style={{ color: "var(--red)" }}>{h.text}</span></Row>)}</Section>}
+                      {r.diff.schema.length > 0 && <Section title="Structured data only in rendered DOM" count={r.diff.schema.length} defaultOpen tagText="JS-only" tagColor="var(--red)">{r.diff.schema.map((s,i) => <div key={i} style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)", background: "var(--red-bg)" }}><div style={{ color: "var(--red)", fontWeight: 600 }}>@type: {s.parsed?.["@type"] || "unknown"}</div></div>)}</Section>}
+                      {r.diff.images.length > 0 && <Section title="Images only in rendered DOM" count={r.diff.images.length} defaultOpen={false} tagText="JS-only" tagColor="var(--orange)">{r.diff.images.slice(0,50).map((img,i) => <Row key={i} cols="1fr 1fr"><span style={{ color: "var(--muted)", wordBreak: "break-all", fontSize: 12, fontFamily: "var(--font-mono)" }}>{trunc(img.src,80)}</span><span style={{ fontSize: 12 }}>{img.alt || <span style={{ color: "var(--red)", fontStyle: "italic" }}>no alt</span>}</span></Row>)}</Section>}
+                    </>
+                  )
+                )}
+              </div>
+            )}
           </>
         )}
+
+        {/* ═══ MODE: CRAWL TEST ═══ */}
+        {mode === "crawl" && (
+          <CrawlTest onResults={setCrawlResults} />
+        )}
+
+        <div style={{ height: 60 }} />
       </div>
     </div>
   );
 }
 
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(React.createElement(App));
-  </script>
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
 </body>
 </html>
