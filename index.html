@@ -993,19 +993,21 @@ function CrawlTest({ onResults }) {
                             {"\u2014"} No robots.txt found
                           </div>
                         )}
-                        {cr.robotsMeta && /noindex|nofollow|none/i.test(cr.robotsMeta) ? (
+                        {cr.robotsMeta && /noindex|nofollow|none/i.test(cr.robotsMeta) && (
                           <div style={{ fontSize: 11, color: "var(--orange)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
                             <span>{"\u26A0"}</span> Meta robots: {cr.robotsMeta}
                           </div>
-                        ) : cr.robotsMeta ? (
+                        )}
+                        {cr.robotsMeta && !/noindex|nofollow|none/i.test(cr.robotsMeta) && (
                           <div style={{ fontSize: 11, color: "var(--green)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
                             <span>{"\u2713"}</span> Meta robots: {cr.robotsMeta}
                           </div>
-                        ) : !cr.isBaseline && cr.status === 200 ? (
+                        )}
+                        {!cr.robotsMeta && !cr.isBaseline && cr.status === 200 && (
                           <div style={{ fontSize: 11, color: "var(--green)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
                             <span>{"\u2713"}</span> No restrictive meta robots tags
                           </div>
-                        ) : null}
+                        )}
                         {cr.specificRobotsMeta && (
                           <div style={{ fontSize: 11, color: /noindex|nofollow|none/i.test(cr.specificRobotsMeta) ? "var(--red)" : "var(--purple)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
                             <span>{/noindex|nofollow|none/i.test(cr.specificRobotsMeta) ? "\u2717" : "\u2713"}</span> Bot-specific meta: {cr.specificRobotsMeta}
