@@ -695,7 +695,10 @@ function generateReport(r, crawlResults) {
       const icon = cr.blocked ? "BLOCKED" : cr.status === 200 ? "OK" : cr.status === 0 ? "ERROR" : `${cr.status}`;
       lines.push(`[${icon}] ${cr.name} (${cr.org}) \u2014 HTTP ${cr.status} ${cr.statusText || ""} \u2014 ${cr.responseTimeMs}ms`);
       if (cr.redirectedTo) lines.push(`  Redirected to: ${cr.redirectedTo}`);
+      if (cr.robotsTxt === "disallowed") lines.push(`  Robots.txt: BLOCKED (matched: ${cr.robotsTxtMatchedAgent})`);
+      if (cr.robotsTxt === "allowed" && cr.robotsTxtMatchedAgent && cr.robotsTxtMatchedAgent !== "none") lines.push(`  Robots.txt: Allowed (matched: ${cr.robotsTxtMatchedAgent})`);
       if (cr.robotsMeta) lines.push(`  Meta robots: ${cr.robotsMeta}`);
+      if (cr.specificRobotsMeta) lines.push(`  Bot-specific meta: ${cr.specificRobotsMeta}`);
       if (cr.error) lines.push(`  Error: ${cr.error}`);
     }
   }
@@ -902,17 +905,17 @@ function CrawlTest({ onResults }) {
             const errored = bots.filter(r => r.status === 0);
             const other = bots.filter(r => !r.blocked && r.status !== 200 && !(r.status >= 300 && r.status < 400) && r.status !== 0);
             const intermittent = bots.filter(r => r.passes && r.passes.length > 1 && !r.consistent);
+            const robotsBlocked = bots.filter(r => r.robotsTxt === "disallowed");
 
             return (
               <>
                 {/* Summary cards */}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 12, marginBottom: 24 }}>
                   {[
-                    { n: ok.length, label: "Allowed", color: ok.length > 0 ? "var(--green)" : "var(--dim)" },
-                    { n: blocked.length, label: "Blocked", color: blocked.length > 0 ? "var(--red)" : "var(--green)" },
+                    { n: ok.length, label: "HTTP Allowed", color: ok.length > 0 ? "var(--green)" : "var(--dim)" },
+                    { n: blocked.length, label: "HTTP Blocked", color: blocked.length > 0 ? "var(--red)" : "var(--green)" },
+                    { n: robotsBlocked.length, label: "Robots.txt Blocked", color: robotsBlocked.length > 0 ? "var(--red)" : "var(--green)" },
                     { n: intermittent.length, label: "Intermittent", color: intermittent.length > 0 ? "var(--orange)" : "var(--dim)" },
-                    { n: redirected.length, label: "Redirected", color: redirected.length > 0 ? "var(--orange)" : "var(--dim)" },
-                    { n: errored.length + other.length, label: "Errors / Other", color: (errored.length + other.length) > 0 ? "var(--orange)" : "var(--dim)" },
                   ].map((card, i) => (
                     <div key={i} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", borderLeft: `3px solid ${card.color}` }}>
                       <div style={{ fontSize: 24, fontWeight: 700, color: card.color, fontFamily: "var(--font-mono)" }}>{card.n}</div>
@@ -975,6 +978,16 @@ function CrawlTest({ onResults }) {
                           </div>
                         )}
                         {cr.redirectedTo && <div style={{ fontSize: 11, color: "var(--orange)", marginTop: 3, fontFamily: "var(--font-mono)" }}>{"\u21B7"} Redirected to: {trunc(cr.redirectedTo, 60)}</div>}
+                        {cr.robotsTxt && cr.robotsTxt === "disallowed" && (
+                          <div style={{ fontSize: 11, color: "var(--red)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{"\u2717"}</span> Blocked by robots.txt {cr.robotsTxtMatchedAgent && <span style={{ color: "var(--dim)" }}>(matched: {cr.robotsTxtMatchedAgent})</span>}
+                          </div>
+                        )}
+                        {cr.robotsTxt && cr.robotsTxt === "allowed" && cr.robotsTxtMatchedAgent && cr.robotsTxtMatchedAgent !== "none" && (
+                          <div style={{ fontSize: 11, color: "var(--green)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{"\u2713"}</span> Allowed by robots.txt {cr.robotsTxtMatchedAgent !== "*" && <span style={{ color: "var(--dim)" }}>(matched: {cr.robotsTxtMatchedAgent})</span>}
+                          </div>
+                        )}
                         {cr.robotsMeta && <div style={{ fontSize: 11, color: "var(--purple)", marginTop: 3 }}>Meta robots: {cr.robotsMeta}</div>}
                         {cr.specificRobotsMeta && <div style={{ fontSize: 11, color: "var(--purple)", marginTop: 3 }}>Bot-specific meta: {cr.specificRobotsMeta}</div>}
                         {cr.error && <div style={{ fontSize: 11, color: "var(--red)", marginTop: 3 }}>{cr.timeout ? "Request timed out (15s)" : cr.error}</div>}
@@ -1007,11 +1020,21 @@ function CrawlTest({ onResults }) {
                     </div>
                   </div>
                 )}
-                {blocked.length === 0 && intermittent.length === 0 && ok.length === bots.length && (
+                {robotsBlocked.length > 0 && (
+                  <div style={{ background: "var(--red-bg)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: 10, padding: "16px 20px", marginTop: 16, borderLeft: "3px solid var(--red)" }}>
+                    <div style={{ fontWeight: 700, color: "var(--red)", marginBottom: 6, fontSize: 13 }}>
+                      {robotsBlocked.length} crawler{robotsBlocked.length > 1 ? "s" : ""} blocked by robots.txt
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
+                      The site's robots.txt file disallows access for: <strong style={{ color: "var(--text)" }}>{robotsBlocked.map(b => b.name).join(", ")}</strong>. Well-behaved crawlers will respect this and not index the page. Note that robots.txt is a voluntary standard {"\u2014"} it tells bots they shouldn't access the page, but doesn't technically prevent it. Some bots may still crawl despite being disallowed.
+                    </div>
+                  </div>
+                )}
+                {blocked.length === 0 && intermittent.length === 0 && robotsBlocked.length === 0 && ok.length === bots.length && (
                   <div style={{ background: "var(--green-bg)", border: "1px solid rgba(74,222,128,0.2)", borderRadius: 10, padding: "16px 20px", marginTop: 16, borderLeft: "3px solid var(--green)" }}>
                     <div style={{ fontWeight: 700, color: "var(--green)", marginBottom: 4, fontSize: 13 }}>All crawlers allowed consistently</div>
                     <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
-                      All tested LLM crawlers received a 200 response across all 3 passes. The server isn't blocking any of them at the HTTP level. Note: this doesn't check robots.txt rules, which some crawlers may still respect.
+                      All tested LLM crawlers received a 200 response across all 3 passes, and none are blocked by robots.txt or meta robots tags.
                     </div>
                   </div>
                 )}
