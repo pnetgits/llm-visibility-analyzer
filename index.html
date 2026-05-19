@@ -978,18 +978,39 @@ function CrawlTest({ onResults }) {
                           </div>
                         )}
                         {cr.redirectedTo && <div style={{ fontSize: 11, color: "var(--orange)", marginTop: 3, fontFamily: "var(--font-mono)" }}>{"\u21B7"} Redirected to: {trunc(cr.redirectedTo, 60)}</div>}
-                        {cr.robotsTxt && cr.robotsTxt === "disallowed" && (
+                        {cr.robotsTxt === "disallowed" && (
                           <div style={{ fontSize: 11, color: "var(--red)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
-                            <span>{"\u2717"}</span> Blocked by robots.txt {cr.robotsTxtMatchedAgent && <span style={{ color: "var(--dim)" }}>(matched: {cr.robotsTxtMatchedAgent})</span>}
+                            <span>{"\u2717"}</span> Blocked by robots.txt <span style={{ color: "var(--dim)" }}>(matched: {cr.robotsTxtMatchedAgent})</span>
                           </div>
                         )}
-                        {cr.robotsTxt && cr.robotsTxt === "allowed" && cr.robotsTxtMatchedAgent && cr.robotsTxtMatchedAgent !== "none" && (
+                        {cr.robotsTxt === "allowed" && (
                           <div style={{ fontSize: 11, color: "var(--green)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
-                            <span>{"\u2713"}</span> Allowed by robots.txt {cr.robotsTxtMatchedAgent !== "*" && <span style={{ color: "var(--dim)" }}>(matched: {cr.robotsTxtMatchedAgent})</span>}
+                            <span>{"\u2713"}</span> Allowed by robots.txt {cr.robotsTxtMatchedAgent && cr.robotsTxtMatchedAgent !== "none" && cr.robotsTxtMatchedAgent !== "*" && <span style={{ color: "var(--dim)" }}>(matched: {cr.robotsTxtMatchedAgent})</span>}
                           </div>
                         )}
-                        {cr.robotsMeta && <div style={{ fontSize: 11, color: "var(--purple)", marginTop: 3 }}>Meta robots: {cr.robotsMeta}</div>}
-                        {cr.specificRobotsMeta && <div style={{ fontSize: 11, color: "var(--purple)", marginTop: 3 }}>Bot-specific meta: {cr.specificRobotsMeta}</div>}
+                        {cr.robotsTxt === null && !cr.isBaseline && (
+                          <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            {"\u2014"} No robots.txt found
+                          </div>
+                        )}
+                        {cr.robotsMeta && /noindex|nofollow|none/i.test(cr.robotsMeta) ? (
+                          <div style={{ fontSize: 11, color: "var(--orange)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{"\u26A0"}</span> Meta robots: {cr.robotsMeta}
+                          </div>
+                        ) : cr.robotsMeta ? (
+                          <div style={{ fontSize: 11, color: "var(--green)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{"\u2713"}</span> Meta robots: {cr.robotsMeta}
+                          </div>
+                        ) : !cr.isBaseline && cr.status === 200 ? (
+                          <div style={{ fontSize: 11, color: "var(--green)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{"\u2713"}</span> No restrictive meta robots tags
+                          </div>
+                        ) : null}
+                        {cr.specificRobotsMeta && (
+                          <div style={{ fontSize: 11, color: /noindex|nofollow|none/i.test(cr.specificRobotsMeta) ? "var(--red)" : "var(--purple)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{/noindex|nofollow|none/i.test(cr.specificRobotsMeta) ? "\u2717" : "\u2713"}</span> Bot-specific meta: {cr.specificRobotsMeta}
+                          </div>
+                        )}
                         {cr.error && <div style={{ fontSize: 11, color: "var(--red)", marginTop: 3 }}>{cr.timeout ? "Request timed out (15s)" : cr.error}</div>}
                       </div>
                       <Badge color={statusColor(cr)}>HTTP {cr.status || "ERR"}</Badge>
