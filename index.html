@@ -31,6 +31,9 @@
     --purple: #A78BFA;
     --purple-bg: rgba(167,139,250,0.07);
     --cyan: #22D3EE;
+    --emerald: #34D399;
+    --emerald-bg: rgba(52,211,153,0.07);
+    --emerald-dim: rgba(52,211,153,0.09);
     --font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
   }
@@ -553,6 +556,240 @@ function promoteDiffToIssues(diff) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   AGENT READINESS — Action Zone Detection & Audit
+   ═══════════════════════════════════════════════════════════════════ */
+function getNearbyText(el, maxChars = 200) {
+  const parts = [];
+  let walker = el.parentElement;
+  for (let i = 0; i < 4 && walker; i++) {
+    const heading = walker.querySelector("h1,h2,h3,h4,h5,h6");
+    if (heading) { parts.push(heading.textContent.trim()); break; }
+    walker = walker.parentElement;
+  }
+  const legend = el.closest("fieldset")?.querySelector("legend")?.textContent?.trim();
+  if (legend) parts.push(legend);
+  const ariaLabel = el.getAttribute("aria-label");
+  if (ariaLabel) parts.push(ariaLabel);
+  return parts.join(" | ").slice(0, maxChars);
+}
+
+function classifyForm(form) {
+  const html = form.outerHTML.toLowerCase();
+  const text = form.textContent.toLowerCase();
+  const inputs = Array.from(form.querySelectorAll("input,select,textarea"));
+  const inputTypes = inputs.map(i => i.getAttribute("type") || "text");
+  const inputNames = inputs.map(i => (i.getAttribute("name") || i.getAttribute("id") || "").toLowerCase());
+  const allNames = inputNames.join(" ");
+  const buttonText = Array.from(form.querySelectorAll("button,input[type=submit]")).map(b => b.textContent?.trim() || b.value || "").join(" ").toLowerCase();
+
+  if (form.getAttribute("role") === "search" || inputTypes.includes("search") || /search|query|q\b/.test(allNames) && inputs.length <= 2) return { category: "search", label: "Site search", confidence: 0.95 };
+  if (inputTypes.includes("password") && /log.?in|sign.?in/i.test(text + " " + buttonText)) return { category: "login", label: "Login / Sign in", confidence: 0.95 };
+  if (inputTypes.includes("password") && /register|sign.?up|create.?account/i.test(text + " " + buttonText)) return { category: "registration", label: "Account registration", confidence: 0.9 };
+  if (inputs.length <= 3 && (inputTypes.includes("email") || /email/.test(allNames)) && !inputTypes.includes("password") && /subscri|newsletter|updates|sign.?up|mailing|notify/i.test(text + " " + buttonText + " " + html)) return { category: "newsletter", label: "Newsletter / email signup", confidence: 0.9 };
+  if (/book|reserv|availab|check.?in|check.?out|arrival|depart|guest/i.test(text + " " + allNames + " " + buttonText) || (inputTypes.includes("date") && /date|arrival|depart|check/i.test(allNames))) return { category: "booking", label: "Booking / reservation form", confidence: 0.85 };
+  if (/contact|enquir|inquir|get.?in.?touch|message|feedback/i.test(text + " " + buttonText + " " + html) || (/name/.test(allNames) && /email/.test(allNames) && /message|comment|body|text/.test(allNames))) return { category: "contact", label: "Contact / enquiry form", confidence: 0.85 };
+  if (/checkout|payment|pay.?now|place.?order|billing|shipping.?address/i.test(text + " " + buttonText + " " + allNames)) return { category: "checkout", label: "Checkout / payment", confidence: 0.9 };
+  if (/add.?to.?(cart|basket|bag)|buy.?now/i.test(buttonText + " " + text)) return { category: "add-to-cart", label: "Add to cart / purchase", confidence: 0.9 };
+  if (/download|get.?(the|your|our|free)|access|whitepaper|ebook|guide|brochure/i.test(text + " " + buttonText)) return { category: "download", label: "Download / lead generation", confidence: 0.8 };
+  if (/appointment|schedule|calendar|time.?slot|consultation/i.test(text + " " + allNames + " " + buttonText)) return { category: "appointment", label: "Appointment / scheduling", confidence: 0.85 };
+  if (/filter|sort|refine|facet/i.test(html) && form.querySelectorAll("input[type=checkbox],input[type=radio],select").length > 3) return { category: "filter", label: "Product/content filter", confidence: 0.7, skip: true };
+  if (inputs.length > 0) return { category: "other-form", label: "Form (unclassified)", confidence: 0.5 };
+  return null;
+}
+
+function classifyCTA(el) {
+  const text = (el.textContent || "").trim().toLowerCase();
+  const ariaLabel = (el.getAttribute("aria-label") || "").toLowerCase();
+  const combined = text + " " + ariaLabel;
+  if (text.length < 2 && !ariaLabel) return null;
+  if (/^(home|about|blog|news|faq|terms|privacy|sitemap|menu|close|back|next|prev)$/i.test(text)) return null;
+  if (/add.?to.?(cart|basket|bag)|buy.?now|purchase/i.test(combined)) return { category: "add-to-cart", label: `Add to cart: "${text.slice(0,40)}"`, confidence: 0.95 };
+  if (/^(book|reserve|check.?availab|make.?a?.?reserv|book.?now|reserve.?now)/i.test(combined)) return { category: "booking", label: `Booking CTA: "${text.slice(0,40)}"`, confidence: 0.9 };
+  if (/^(subscribe|sign.?up|join|get.?updates|notify)/i.test(combined)) return { category: "newsletter", label: `Subscribe CTA: "${text.slice(0,40)}"`, confidence: 0.85 };
+  if (/^(contact|get.?in.?touch|enquire|request.?a?.?quote|send.?message|email.?us)/i.test(combined)) return { category: "contact", label: `Contact CTA: "${text.slice(0,40)}"`, confidence: 0.85 };
+  if (/^(download|get.?(the|your|our|free)|access.?(the|your))/i.test(combined)) return { category: "download", label: `Download CTA: "${text.slice(0,40)}"`, confidence: 0.85 };
+  if (/^(schedule|book.?a?.?(call|demo|appointment|consultation)|request.?a?.?(demo|call))/i.test(combined)) return { category: "appointment", label: `Appointment CTA: "${text.slice(0,40)}"`, confidence: 0.85 };
+  if (/^(log.?in|sign.?in|create.?account|register|sign.?up|get.?started)$/i.test(text)) return { category: "login", label: `Auth CTA: "${text.slice(0,40)}"`, confidence: 0.8 };
+  if (/^(apply|submit|request|claim|redeem|activate)/i.test(combined)) return { category: "other-action", label: `Action CTA: "${text.slice(0,40)}"`, confidence: 0.75 };
+  return null;
+}
+
+function detectActionZones(doc, html) {
+  const zones = [];
+  let idCounter = 0;
+  const makeId = () => `action-${++idCounter}`;
+
+  // 1. FORMS
+  doc.querySelectorAll("form").forEach(form => {
+    const classification = classifyForm(form);
+    if (!classification || classification.skip) return;
+    const inputs = Array.from(form.querySelectorAll("input:not([type=hidden]),select,textarea"));
+    const buttons = Array.from(form.querySelectorAll("button,input[type=submit],input[type=button]"));
+    zones.push({ id: makeId(), type: "form", category: classification.category, label: classification.label, confidence: classification.confidence, elementDesc: `<form> with ${inputs.length} input(s), ${buttons.length} button(s)`, elementSnippet: `<form${form.id ? ` id="${form.id}"` : ""}${form.className ? ` class="${form.className.toString().slice(0,50)}"` : ""}${form.action ? ` action="${form.action.slice(0,60)}"` : ""}>`, nearbyText: getNearbyText(form), element: form, inputCount: inputs.length, buttonCount: buttons.length, source: "auto-detected" });
+  });
+
+  // 2. STANDALONE CTAs
+  const seenCTAText = new Set();
+  doc.querySelectorAll("a[href], button").forEach(el => {
+    if (el.closest("form")) return;
+    if (el.closest("nav") || el.closest("[role='navigation']")) return;
+    const isInHeader = el.closest("header") && !el.closest("main");
+    const isInFooter = el.closest("footer");
+    const classification = classifyCTA(el);
+    if (!classification) return;
+    const dedupeKey = classification.category + "|" + (el.textContent || "").trim().toLowerCase().slice(0, 30);
+    if (seenCTAText.has(dedupeKey)) return;
+    seenCTAText.add(dedupeKey);
+    const confidence = (isInHeader || isInFooter) ? classification.confidence * 0.7 : classification.confidence;
+    const tag = el.tagName.toLowerCase();
+    const href = el.getAttribute("href") || "";
+    zones.push({ id: makeId(), type: "cta", category: classification.category, label: classification.label, confidence, elementDesc: `<${tag}>${tag === "a" ? ` href="${href.slice(0,50)}"` : ""}`, elementSnippet: `<${tag}${el.className ? ` class="${el.className.toString().slice(0,50)}"` : ""}${href ? ` href="${href.slice(0,60)}"` : ""}>${(el.textContent || "").trim().slice(0,40)}</${tag}>`, nearbyText: getNearbyText(el), element: el, isLink: tag === "a", href, source: "auto-detected" });
+  });
+
+  // 3. THIRD-PARTY WIDGETS
+  const widgetPatterns = [
+    { selector: 'iframe[src*="fareharbor"]', category: "booking", name: "FareHarbor", type: "iframe" },
+    { selector: 'iframe[src*="bookingkit"]', category: "booking", name: "Bookingkit", type: "iframe" },
+    { selector: 'iframe[src*="rezdy"]', category: "booking", name: "Rezdy", type: "iframe" },
+    { selector: 'iframe[src*="checkfront"]', category: "booking", name: "Checkfront", type: "iframe" },
+    { selector: '[data-fareharbor]', category: "booking", name: "FareHarbor", type: "widget" },
+    { selector: 'iframe[src*="calendly"]', category: "appointment", name: "Calendly", type: "iframe" },
+    { selector: 'iframe[src*="acuityscheduling"]', category: "appointment", name: "Acuity", type: "iframe" },
+    { selector: '[class*="calendly"]', category: "appointment", name: "Calendly", type: "widget" },
+    { selector: 'iframe[src*="stripe"]', category: "checkout", name: "Stripe", type: "iframe" },
+    { selector: 'iframe[src*="paypal"]', category: "checkout", name: "PayPal", type: "iframe" },
+    { selector: '[data-stripe]', category: "checkout", name: "Stripe Elements", type: "widget" },
+    { selector: '#intercom-container', category: "chat", name: "Intercom", type: "widget" },
+    { selector: '[class*="intercom"]', category: "chat", name: "Intercom", type: "widget" },
+    { selector: '#drift-widget', category: "chat", name: "Drift", type: "widget" },
+    { selector: '[class*="zE-"]', category: "chat", name: "Zendesk", type: "widget" },
+    { selector: '#tidio-chat', category: "chat", name: "Tidio", type: "widget" },
+    { selector: '[class*="crisp"]', category: "chat", name: "Crisp", type: "widget" },
+    { selector: '#hubspot-messages-iframe-container', category: "chat", name: "HubSpot Chat", type: "widget" },
+    { selector: 'iframe[src*="livechat"]', category: "chat", name: "LiveChat", type: "iframe" },
+  ];
+  const seenWidgets = new Set();
+  widgetPatterns.forEach(wp => { doc.querySelectorAll(wp.selector).forEach(el => { if (seenWidgets.has(wp.name)) return; seenWidgets.add(wp.name); zones.push({ id: makeId(), type: "widget", category: wp.category, label: `${wp.name} ${wp.category} widget`, confidence: 0.95, elementDesc: `${wp.type === "iframe" ? "iframe" : "widget"} (${wp.name})`, elementSnippet: `<${el.tagName.toLowerCase()} ${wp.type === "iframe" ? `src="${(el.getAttribute("src") || "").slice(0,60)}"` : `class="${(el.className || "").toString().slice(0,50)}"`}>`, nearbyText: getNearbyText(el), element: el, widgetName: wp.name, widgetType: wp.type, source: "auto-detected" }); }); });
+
+  const scriptSrcs = Array.from(doc.querySelectorAll("script[src]")).map(s => s.getAttribute("src") || "");
+  const scriptWidgets = [{ pattern: /intercom/i, name: "Intercom", category: "chat" },{ pattern: /drift/i, name: "Drift", category: "chat" },{ pattern: /zendesk|zopim/i, name: "Zendesk", category: "chat" },{ pattern: /tidio/i, name: "Tidio", category: "chat" },{ pattern: /livechat/i, name: "LiveChat", category: "chat" },{ pattern: /crisp\.chat/i, name: "Crisp", category: "chat" },{ pattern: /calendly/i, name: "Calendly", category: "appointment" },{ pattern: /fareharbor/i, name: "FareHarbor", category: "booking" }];
+  scriptSrcs.forEach(src => { scriptWidgets.forEach(sw => { if (sw.pattern.test(src) && !seenWidgets.has(sw.name)) { seenWidgets.add(sw.name); zones.push({ id: makeId(), type: "widget", category: sw.category, label: `${sw.name} (detected via script)`, confidence: 0.85, elementDesc: `Script: ${src.slice(0, 60)}`, elementSnippet: `<script src="${src.slice(0,80)}">`, nearbyText: "", element: null, widgetName: sw.name, widgetType: "script", source: "auto-detected" }); } }); });
+
+  // 4. BLOCKERS
+  const blockerPatterns = [
+    { selector: '[class*="g-recaptcha"],[data-sitekey]', name: "reCAPTCHA", type: "captcha" },
+    { selector: '[class*="h-captcha"],[data-hcaptcha]', name: "hCaptcha", type: "captcha" },
+    { selector: '[class*="cf-turnstile"]', name: "Cloudflare Turnstile", type: "captcha" },
+    { selector: 'script[src*="akamai"]', name: "Akamai Bot Manager", type: "bot-detection" },
+    { selector: 'script[src*="datadome"]', name: "DataDome", type: "bot-detection" },
+    { selector: 'script[src*="perimeterx"],script[src*="human.com"]', name: "HUMAN (PerimeterX)", type: "bot-detection" },
+    { selector: '[class*="onetrust"],[id*="onetrust"]', name: "OneTrust", type: "consent" },
+    { selector: '[id*="CybotCookiebot"],[class*="cookiebot"]', name: "CookieBot", type: "consent" },
+    { selector: '[class*="didomi"],[id*="didomi"]', name: "Didomi", type: "consent" },
+    { selector: '[class*="trustarc"],[id*="trustarc"]', name: "TrustArc", type: "consent" },
+    { selector: '[id*="quantcast"],[class*="qc-cmp"]', name: "Quantcast", type: "consent" },
+    { selector: '[class*="cookie-banner"],[class*="cookie-notice"],[class*="cookie-consent"],[id*="cookie-banner"],[id*="cookie-notice"]', name: "Cookie banner", type: "consent" },
+  ];
+  const captchaScripts = [{ pattern: /recaptcha/i, name: "reCAPTCHA", type: "captcha" },{ pattern: /hcaptcha/i, name: "hCaptcha", type: "captcha" },{ pattern: /challenges\.cloudflare/i, name: "Cloudflare Turnstile", type: "captcha" },{ pattern: /datadome/i, name: "DataDome", type: "bot-detection" },{ pattern: /perimeterx|human\.com.*px/i, name: "HUMAN (PerimeterX)", type: "bot-detection" }];
+  const seenBlockers = new Set();
+  blockerPatterns.forEach(bp => { try { doc.querySelectorAll(bp.selector).forEach(el => { if (seenBlockers.has(bp.name)) return; seenBlockers.add(bp.name); zones.push({ id: makeId(), type: "blocker", category: bp.type, label: `${bp.name} (${bp.type === "captcha" ? "CAPTCHA" : bp.type === "bot-detection" ? "bot detection" : "cookie consent"})`, confidence: 0.95, elementDesc: bp.name, elementSnippet: `<${el.tagName.toLowerCase()} class="${(el.className || "").toString().slice(0,50)}">`, nearbyText: "", element: el, blockerName: bp.name, blockerType: bp.type, source: "auto-detected" }); }); } catch(e) {} });
+  scriptSrcs.forEach(src => { captchaScripts.forEach(cs => { if (cs.pattern.test(src) && !seenBlockers.has(cs.name)) { seenBlockers.add(cs.name); zones.push({ id: makeId(), type: "blocker", category: cs.type, label: `${cs.name} (detected via script)`, confidence: 0.9, elementDesc: `Script: ${src.slice(0, 60)}`, elementSnippet: `<script src="${src.slice(0,80)}">`, nearbyText: "", element: null, blockerName: cs.name, blockerType: cs.type, source: "auto-detected" }); } }); });
+
+  // 5. SCHEMA ACTIONS
+  doc.querySelectorAll('script[type="application/ld+json"]').forEach(script => { try { const data = JSON.parse(script.textContent); const items = Array.isArray(data) ? data : [data]; items.forEach(item => { const actions = []; if (item.potentialAction) { const pa = Array.isArray(item.potentialAction) ? item.potentialAction : [item.potentialAction]; actions.push(...pa); } if (item["@graph"]) { item["@graph"].forEach(g => { if (g.potentialAction) { const pa = Array.isArray(g.potentialAction) ? g.potentialAction : [g.potentialAction]; actions.push(...pa); } }); } actions.forEach(action => { const actionType = action["@type"] || "Unknown"; zones.push({ id: makeId(), type: "schema-action", category: "schema", label: `Schema: ${actionType}`, confidence: 0.9, elementDesc: `potentialAction: ${actionType}`, elementSnippet: JSON.stringify(action).slice(0, 120), nearbyText: action.target ? `Target: ${typeof action.target === "string" ? action.target : JSON.stringify(action.target).slice(0,80)}` : "", element: null, actionType, source: "auto-detected" }); }); }); } catch(e) {} });
+
+  zones.sort((a, b) => { if (a.type === "blocker" && b.type !== "blocker") return -1; if (b.type === "blocker" && a.type !== "blocker") return 1; return b.confidence - a.confidence; });
+  return zones;
+}
+
+function matchUserActions(userActionTexts, existingZones, doc) {
+  const newZones = [];
+  let idCounter = existingZones.length;
+  userActionTexts.forEach(actionText => {
+    const text = actionText.trim().toLowerCase();
+    if (!text) return;
+    const existingMatch = existingZones.find(z => { const zLabel = z.label.toLowerCase(); const actionWords = text.split(/\s+/).filter(w => w.length > 3); return actionWords.some(w => zLabel.includes(w) || z.category.toLowerCase().includes(w)); });
+    if (existingMatch) { existingMatch.userConfirmed = true; existingMatch.userAction = actionText; return; }
+    const keywords = text.split(/\s+/).filter(w => w.length > 2);
+    let bestMatch = null, bestScore = 0;
+    doc.querySelectorAll("button, a, form, input[type=submit]").forEach(el => { const elText = (el.textContent || "").toLowerCase() + " " + (el.getAttribute("aria-label") || "").toLowerCase(); let score = 0; keywords.forEach(kw => { if (elText.includes(kw)) score++; }); if (score > bestScore) { bestScore = score; bestMatch = el; } });
+    if (bestMatch && bestScore >= 1) { const tag = bestMatch.tagName.toLowerCase(); newZones.push({ id: `action-${++idCounter}`, type: tag === "form" ? "form" : "cta", category: "user-defined", label: actionText, confidence: 0.6 + (bestScore * 0.1), elementDesc: `<${tag}> matched by text similarity`, elementSnippet: `<${tag}${bestMatch.className ? ` class="${bestMatch.className.toString().slice(0,50)}"` : ""}>${(bestMatch.textContent || "").trim().slice(0,40)}`, nearbyText: getNearbyText(bestMatch), element: bestMatch, userDefined: true, userAction: actionText, source: "user-defined" }); }
+    else { newZones.push({ id: `action-${++idCounter}`, type: "unmatched", category: "user-defined", label: actionText, confidence: 0, elementDesc: "No matching element found in HTML", elementSnippet: "", nearbyText: "", element: null, userDefined: true, userAction: actionText, source: "user-defined" }); }
+  });
+  return newZones;
+}
+
+function auditActionZone(zone, doc) {
+  const issues = [];
+  const el = zone.element;
+  if (zone.type === "blocker") {
+    if (zone.blockerType === "captcha") issues.push({ severity: "high", check: "captcha-present", title: `${zone.blockerName} will block AI agents`, detail: "CAPTCHAs prevent automated interaction. No current AI agent can solve these reliably.", impact: "Any form or action protected by this CAPTCHA will be inaccessible to AI agents." });
+    else if (zone.blockerType === "bot-detection") issues.push({ severity: "high", check: "bot-detection-present", title: `${zone.blockerName} may block or challenge AI agents`, detail: "Bot detection services fingerprint automated browsers and can block or serve challenges to AI agents.", impact: "AI agents may be blocked entirely, or served degraded/different page content." });
+    else if (zone.blockerType === "consent") issues.push({ severity: "medium", check: "consent-overlay", title: `${zone.blockerName} consent overlay may block interaction`, detail: "Cookie consent overlays sit on top of page content. AI agents need to dismiss these before interacting with anything else.", impact: "Agents that can't dismiss the consent dialog won't be able to interact with page elements behind it." });
+    return { zone, issues, score: zone.blockerType === "consent" ? "warning" : "blocker" };
+  }
+  if (zone.type === "unmatched") { issues.push({ severity: "high", check: "no-matching-element", title: `No HTML element found for: "${zone.label}"`, detail: "No form, button, or link in the page source matches this action.", impact: "This action may only be available via JavaScript, behind a login, or may not exist on this page." }); return { zone, issues, score: "poor" }; }
+  if (zone.type === "schema-action") { if (!zone.nearbyText || !zone.nearbyText.includes("Target:")) issues.push({ severity: "medium", check: "schema-no-target", title: `${zone.actionType} has no target URL`, detail: "This schema action doesn't specify a target URL pattern.", impact: "Agents can see the action exists but can't programmatically use it." }); return { zone, issues, score: issues.length === 0 ? "good" : "partial" }; }
+  if (zone.type === "widget") {
+    if (zone.widgetType === "iframe") issues.push({ severity: "high", check: "iframe-widget", title: `${zone.widgetName} runs in an iframe \u2014 agents can't cross this boundary`, detail: "This widget loads in a separate iframe. AI agents on the parent page cannot interact with iframe content.", impact: `The entire ${zone.category} flow (${zone.widgetName}) is inaccessible to AI agents.` });
+    if (zone.widgetType === "script") issues.push({ severity: "medium", check: "js-widget", title: `${zone.widgetName} loads entirely via JavaScript`, detail: "This widget is injected by an external script and doesn't exist in raw HTML.", impact: "Agents parsing HTML source won't find this. Browser-based agents (Claude in Chrome, ChatGPT Operator) may interact after it loads." });
+    if (zone.category === "chat") issues.push({ severity: "low", check: "chat-widget", title: "Chat widgets are generally not agent-targetable", detail: `${zone.widgetName} is a live chat widget. AI agents typically can't initiate conversations through embedded widgets.`, impact: "Low impact unless live chat is required to complete a booking or enquiry." });
+    return { zone, issues, score: issues.some(i => i.severity === "high") ? "poor" : "partial" };
+  }
+  if (!el) { issues.push({ severity: "medium", check: "no-element-ref", title: "Element reference lost", detail: "The HTML element for this action zone couldn't be inspected.", impact: "Partial analysis only." }); return { zone, issues, score: "partial" }; }
+
+  if (zone.type === "form") {
+    const inputs = Array.from(el.querySelectorAll("input:not([type=hidden]),select,textarea"));
+    const buttons = Array.from(el.querySelectorAll("button,input[type=submit],input[type=button]"));
+    const unlabelled = inputs.filter(input => { const id = input.getAttribute("id"); return !( (id && el.querySelector(`label[for="${id}"]`)) || input.closest("label") || input.getAttribute("aria-label") || input.getAttribute("aria-labelledby") || input.getAttribute("placeholder") || input.getAttribute("title") ); });
+    if (unlabelled.length > 0) issues.push({ severity: "high", check: "unlabelled-inputs", title: `${unlabelled.length} form field(s) have no label, aria-label, or placeholder`, detail: unlabelled.map(i => `<${i.tagName.toLowerCase()} type="${i.getAttribute("type") || "text"}" name="${i.getAttribute("name") || "?"}">`).slice(0,5).join("\n"), impact: "AI agents can't determine what to enter in these fields." });
+    const placeholderOnly = inputs.filter(input => { const id = input.getAttribute("id"); return !((id && el.querySelector(`label[for="${id}"]`)) || input.closest("label") || input.getAttribute("aria-label")) && input.getAttribute("placeholder"); });
+    if (placeholderOnly.length > 0) issues.push({ severity: "low", check: "placeholder-only-labels", title: `${placeholderOnly.length} field(s) rely on placeholder as the only label`, detail: placeholderOnly.map(i => `<input placeholder="${i.getAttribute("placeholder")}">`).slice(0,3).join("\n"), impact: "Most agents can read placeholders, but proper <label> elements are more reliable." });
+    if (buttons.length === 0) issues.push({ severity: "high", check: "no-submit-button", title: "Form has no visible submit button", detail: "No <button> or <input type='submit'> found.", impact: "AI agents look for a submit button to complete forms. Without one, the agent can't submit." });
+    buttons.forEach(btn => { const btnText = (btn.textContent || "").trim(); if (!btnText && !btn.getAttribute("value") && !btn.getAttribute("aria-label")) issues.push({ severity: "medium", check: "empty-submit-button", title: "Submit button has no text or aria-label", detail: `<${btn.tagName.toLowerCase()} type="${btn.getAttribute("type") || "?"}">`, impact: "Agents can't determine what this button does." }); });
+    if (el.querySelectorAll('[class*="select"][role]:not(select),[class*="dropdown"][role]:not(select),[class*="combobox"]:not(select)').length > 0) issues.push({ severity: "medium", check: "custom-select", title: "Custom dropdown(s) instead of native <select>", detail: "Custom JS dropdowns require specific ARIA roles to be agent-accessible.", impact: "Browser-based agents may struggle. Native <select> is universally understood." });
+    if (el.querySelectorAll('[class*="datepicker"],[class*="date-picker"],[data-datepicker],[class*="flatpickr"],[class*="pikaday"]').length > 0) issues.push({ severity: "medium", check: "custom-datepicker", title: "Custom date picker widget detected", detail: "JS-based date pickers are harder for agents than native <input type='date'>.", impact: "Browser-based agents may struggle to select dates." });
+    if (el.querySelectorAll("input[type=file]").length > 0) issues.push({ severity: "medium", check: "file-upload-required", title: "Form requires file upload", detail: "File upload fields require agents to have local file access.", impact: "Most AI agents can't upload files." });
+    if (el.querySelector('[class*="g-recaptcha"],[class*="h-captcha"],[class*="cf-turnstile"],[data-sitekey]')) issues.push({ severity: "high", check: "form-captcha", title: "This form is protected by a CAPTCHA", detail: "A CAPTCHA challenge is embedded directly in this form.", impact: "AI agents cannot solve CAPTCHAs. This form is inaccessible to all current agents." });
+  } else if (zone.type === "cta") {
+    if (zone.isLink) { const href = el.getAttribute("href") || ""; if (href === "#" || href.startsWith("javascript:")) issues.push({ severity: "high", check: "fake-link", title: "CTA uses a fake link (href='#' or javascript:)", detail: `<a href="${href}">${(el.textContent || "").trim().slice(0,40)}</a>`, impact: "This link relies on a JS click handler. LLM crawlers can't follow it." }); }
+    const tag = el.tagName.toLowerCase();
+    if (!zone.isLink && tag !== "button" && tag !== "input" && el.getAttribute("role") !== "button" && el.getAttribute("role") !== "link") issues.push({ severity: "high", check: "non-semantic-cta", title: `CTA is a <${tag}> without role="button"`, detail: `<${tag} class="${(el.className || "").toString().slice(0,40)}">${(el.textContent || "").trim().slice(0,40)}</${tag}>`, impact: "AI agents can't identify this as interactive. Use <button>, <a>, or add role='button'." });
+    const ctaText = (el.textContent || "").trim().toLowerCase();
+    if (/^(click here|learn more|more|here|go|submit|ok|yes)$/i.test(ctaText)) issues.push({ severity: "medium", check: "vague-cta-text", title: `CTA text is vague: "${ctaText}"`, detail: "Generic text doesn't tell an agent what action this performs.", impact: "Agents need descriptive text to decide whether to click." });
+    if (zone.isLink && el.getAttribute("onclick") && (!el.getAttribute("href") || el.getAttribute("href") === "#")) issues.push({ severity: "high", check: "onclick-cta", title: "CTA relies on onclick handler instead of a real URL", detail: `onclick="${(el.getAttribute("onclick") || "").slice(0,60)}"`, impact: "The action is in JavaScript, not a navigable href." });
+  }
+
+  // Cross-cutting checks
+  if (el) {
+    const modal = el.closest('[class*="modal"],[class*="dialog"],[role="dialog"],[class*="popup"],[class*="overlay"]');
+    if (modal && ((modal.getAttribute("style") || "").includes("display: none") || (modal.getAttribute("style") || "").includes("visibility: hidden") || modal.getAttribute("aria-hidden") === "true")) issues.push({ severity: "high", check: "hidden-modal", title: "This action is inside a hidden modal/dialog", detail: "The form/CTA is inside a modal that's not visible by default.", impact: "The agent needs to find and click a trigger to open this modal first." });
+    if (el.getAttribute("aria-hidden") === "true" || el.closest('[aria-hidden="true"]')) issues.push({ severity: "high", check: "aria-hidden-action", title: "This action element has aria-hidden='true'", detail: "The element or a parent is hidden from assistive technology.", impact: "AI agents using the accessibility tree will not see this element." });
+  }
+
+  const highCount = issues.filter(i => i.severity === "high").length;
+  const medCount = issues.filter(i => i.severity === "medium").length;
+  return { zone, issues, score: highCount > 0 ? "poor" : medCount > 0 ? "partial" : "good" };
+}
+
+function runAgentReadinessAudit(confirmedZones, doc) { return confirmedZones.map(zone => auditActionZone(zone, doc)); }
+
+function checkGlobalAgentSignals(doc, html) {
+  const signals = [];
+  const hasSchemaActions = /potentialAction/i.test(html);
+  signals.push({ check: "schema-actions", present: hasSchemaActions, label: "Schema.org potentialAction markup", detail: hasSchemaActions ? "Page declares structured actions \u2014 agents can discover interactions via schema" : "No potentialAction in schema \u2014 agents must infer actions from the UI" });
+  const hasMain = doc.querySelector("main") || doc.querySelector('[role="main"]');
+  signals.push({ check: "main-landmark", present: !!hasMain, label: "<main> landmark element", detail: hasMain ? "Page has a main content area \u2014 helps agents focus on primary content" : "No <main> element \u2014 agents may struggle to distinguish primary content from nav/footer" });
+  const hasNav = doc.querySelector("nav") || doc.querySelector('[role="navigation"]');
+  signals.push({ check: "nav-landmark", present: !!hasNav, label: "Navigation landmark (<nav>)", detail: hasNav ? "Navigation is properly landmarked" : "No <nav> elements found" });
+  const h1s = doc.querySelectorAll("h1");
+  signals.push({ check: "h1-present", present: h1s.length === 1, label: "Single H1 heading", detail: h1s.length === 0 ? "No H1 \u2014 agents can't identify the page's primary topic" : h1s.length === 1 ? "Single H1 present \u2014 clear page topic" : `${h1s.length} H1s \u2014 may confuse agents about the page's purpose` });
+  const hasLlmsTxt = /llms\.txt|llms-full\.txt/i.test(html);
+  signals.push({ check: "llms-txt", present: hasLlmsTxt, label: "llms.txt reference", detail: hasLlmsTxt ? "Page references llms.txt \u2014 provides structured instructions for LLMs" : "No llms.txt reference (optional, emerging standard)" });
+  return signals;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
    FULL ANALYSIS PIPELINE
    ═══════════════════════════════════════════════════════════════════ */
 function analyze(sourceHtml, renderedHtml) {
@@ -639,8 +876,12 @@ function HelpGuide({ onClose }) {
           <p style={{ marginBottom: 12 }}>Enter a URL to test whether different LLM crawlers can actually access the page. This sends real HTTP requests using each crawler's user-agent string and shows you the response status for each one.</p>
           <p style={{ marginBottom: 8 }}>This feature requires a small proxy service (Cloudflare Worker) because browsers can't send requests with custom user agents. If you haven't set this up yet, the tool will show you how.</p>
 
+          <h3 style={{ color: "#34D399", fontSize: 16, fontWeight: 700, marginBottom: 8, marginTop: 16 }}>Agent Readiness</h3>
+          <p style={{ marginBottom: 12 }}>Checks whether AI agents (like ChatGPT Operator, Claude in Chrome) could complete actions on the page {"\u2014"} booking, purchasing, filling forms, etc. Paste source HTML in Page Analysis first, then switch to Agent Readiness.</p>
+          <p style={{ marginBottom: 12 }}>The tool auto-detects forms, CTAs, booking widgets, and blockers (CAPTCHAs, bot detection). You tick which actions matter, optionally add custom ones, and it audits each for agent readiness {"\u2014"} checking labels, semantic HTML, accessibility, and more.</p>
+
           <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "14px 16px", marginTop: 16, borderLeft: "3px solid var(--accent)" }}>
-            <strong style={{ color: "var(--accent)" }}>Tip:</strong> Start with the Crawl Test to check if pages are accessible, then use Page Analysis to dig into what content LLMs can actually see.
+            <strong style={{ color: "var(--accent)" }}>Tip:</strong> Use all three together: Crawl Test checks access, Page Analysis checks content visibility, Agent Readiness checks whether agents can take actions.
           </div>
         </div>
       </div>
@@ -1071,6 +1312,195 @@ function CrawlTest({ onResults }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   AGENT READINESS COMPONENT
+   ═══════════════════════════════════════════════════════════════════ */
+const categoryMeta = { "search": { icon: "\uD83D\uDD0D", color: "var(--accent)" }, "newsletter": { icon: "\uD83D\uDCE7", color: "var(--purple)" }, "contact": { icon: "\uD83D\uDCAC", color: "var(--accent)" }, "booking": { icon: "\uD83D\uDCC5", color: "var(--cyan)" }, "appointment": { icon: "\uD83D\uDCC5", color: "var(--cyan)" }, "checkout": { icon: "\uD83D\uDCB3", color: "var(--green)" }, "add-to-cart": { icon: "\uD83D\uDED2", color: "var(--green)" }, "login": { icon: "\uD83D\uDD10", color: "var(--muted)" }, "registration": { icon: "\uD83D\uDCDD", color: "var(--muted)" }, "download": { icon: "\uD83D\uDCE5", color: "var(--purple)" }, "chat": { icon: "\uD83D\uDCAC", color: "var(--accent)" }, "captcha": { icon: "\uD83D\uDEE1\uFE0F", color: "var(--red)" }, "bot-detection": { icon: "\uD83D\uDEE1\uFE0F", color: "var(--red)" }, "consent": { icon: "\uD83C\uDF6A", color: "var(--orange)" }, "schema": { icon: "\uD83D\uDCCB", color: "var(--purple)" }, "user-defined": { icon: "\u270F\uFE0F", color: "var(--cyan)" }, "other-form": { icon: "\uD83D\uDCC4", color: "var(--muted)" }, "other-action": { icon: "\u26A1", color: "var(--muted)" } };
+const getCatMeta = (cat) => categoryMeta[cat] || { icon: "\u2022", color: "var(--muted)" };
+const scoreColors = { "good": "var(--green)", "partial": "var(--orange)", "poor": "var(--red)", "blocker": "var(--red)", "warning": "var(--orange)" };
+const scoreLabels = { "good": "Agent Ready", "partial": "Partial Issues", "poor": "Not Agent Ready", "blocker": "Agent Blocker", "warning": "Warning" };
+
+function AgentReadiness({ sourceDoc: externalDoc, sourceHtml }) {
+  const [zones, setZones] = useState([]);
+  const [selected, setSelected] = useState(new Set());
+  const [userActions, setUserActions] = useState("");
+  const [auditResults, setAuditResults] = useState(null);
+  const [globalSignals, setGlobalSignals] = useState([]);
+  const [phase, setPhase] = useState("select");
+  const [internalDoc, setInternalDoc] = useState(null);
+
+  const sourceDoc = externalDoc || internalDoc;
+
+  useEffect(() => {
+    if (externalDoc) { setInternalDoc(null); return; }
+    if (sourceHtml && sourceHtml.trim().length > 50) setInternalDoc(parseDoc(sourceHtml));
+    else setInternalDoc(null);
+  }, [sourceHtml, externalDoc]);
+
+  useEffect(() => {
+    if (!sourceDoc) return;
+    const detected = detectActionZones(sourceDoc, sourceHtml);
+    setZones(detected);
+    const autoSelect = new Set();
+    detected.forEach(z => { if (z.confidence >= 0.7 && z.category !== "filter") autoSelect.add(z.id); });
+    setSelected(autoSelect);
+    setAuditResults(null);
+    setPhase("select");
+    setGlobalSignals(checkGlobalAgentSignals(sourceDoc, sourceHtml));
+  }, [sourceDoc, sourceHtml]);
+
+  const toggleZone = useCallback((id) => { setSelected(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; }); }, []);
+  const selectAll = useCallback(() => { setSelected(new Set(zones.map(z => z.id))); }, [zones]);
+  const selectNone = useCallback(() => { setSelected(new Set()); }, []);
+
+  const runAudit = useCallback(() => {
+    if (!sourceDoc) return;
+    let confirmedZones = zones.filter(z => selected.has(z.id));
+    if (userActions.trim()) {
+      const extraZones = matchUserActions(userActions.split("\n").map(a => a.trim()).filter(a => a.length > 0), confirmedZones, sourceDoc);
+      confirmedZones = [...confirmedZones, ...extraZones];
+    }
+    setAuditResults(runAgentReadinessAudit(confirmedZones, sourceDoc));
+    setPhase("results");
+  }, [zones, selected, userActions, sourceDoc]);
+
+  if (!sourceDoc) return <div style={{ padding: "40px 20px", textAlign: "center", color: "var(--dim)" }}>Paste page source HTML in the Page Analysis tab first, then come here to check agent readiness.</div>;
+
+  const actionZones = zones.filter(z => z.type !== "blocker");
+  const blockers = zones.filter(z => z.type === "blocker");
+
+  if (phase === "select") {
+    return (
+      <div className="fade-in">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 24 }}>
+          {[{ n: actionZones.length, label: "Action Points", color: actionZones.length > 0 ? "var(--emerald)" : "var(--dim)" },{ n: blockers.length, label: "Blockers", color: blockers.length > 0 ? "var(--red)" : "var(--green)" },{ n: zones.filter(z => z.type === "schema-action").length, label: "Schema Actions", color: "var(--purple)" }].map((card, i) => (
+            <div key={i} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", borderLeft: `3px solid ${card.color}` }}>
+              <div style={{ fontSize: 24, fontWeight: 700, color: card.color, fontFamily: "var(--font-mono)" }}>{card.n}</div>
+              <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 3, fontWeight: 600 }}>{card.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {zones.length === 0 ? (
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "32px 24px", textAlign: "center" }}>
+            <div style={{ fontSize: 28, marginBottom: 12 }}>{"\uD83E\uDD37"}</div>
+            <div style={{ color: "var(--muted)", fontSize: 14, lineHeight: 1.6, maxWidth: 400, margin: "0 auto" }}>No action zones detected in the HTML source. This could mean the page is purely informational, or that all interactive elements are loaded via JavaScript.<br/><br/>Try adding actions manually below.</div>
+          </div>
+        ) : (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>Detected Action Points <span style={{ fontSize: 12, color: "var(--dim)", fontWeight: 400, marginLeft: 8 }}>Tick the actions that matter for this page</span></div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={selectAll} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--muted)", fontSize: 11, cursor: "pointer", padding: "4px 12px", fontFamily: "var(--font-body)" }}>Select all</button>
+                <button onClick={selectNone} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--muted)", fontSize: 11, cursor: "pointer", padding: "4px 12px", fontFamily: "var(--font-body)" }}>Clear</button>
+              </div>
+            </div>
+
+            {blockers.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--red)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8, padding: "0 4px" }}>{"\u26A0"} Blockers Detected</div>
+                {blockers.map(z => { const meta = getCatMeta(z.category); return (
+                  <label key={z.id} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 14px", background: "var(--red-bg)", border: "1px solid var(--border)", borderRadius: 8, cursor: "pointer", marginBottom: 6 }}>
+                    <input type="checkbox" checked={selected.has(z.id)} onChange={() => toggleZone(z.id)} style={{ marginTop: 3, accentColor: "var(--red)" }} />
+                    <div style={{ flex: 1 }}><div style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><span>{meta.icon}</span>{z.label}</div><div style={{ fontSize: 11, color: "var(--dim)", marginTop: 2 }}>{z.elementDesc}</div></div>
+                    <Badge color="var(--red)">{z.category}</Badge>
+                  </label>
+                ); })}
+              </div>
+            )}
+
+            {actionZones.map(z => { const meta = getCatMeta(z.category); return (
+              <label key={z.id} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 14px", background: selected.has(z.id) ? "var(--emerald-dim)" : "var(--surface)", border: `1px solid ${selected.has(z.id) ? "var(--emerald)" + "40" : "var(--border)"}`, borderRadius: 8, cursor: "pointer", marginBottom: 6, transition: "all 0.15s" }}>
+                <input type="checkbox" checked={selected.has(z.id)} onChange={() => toggleZone(z.id)} style={{ marginTop: 3, accentColor: "var(--emerald)" }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><span>{meta.icon}</span>{z.label}{z.confidence < 0.7 && <span style={{ fontSize: 10, color: "var(--dim)", fontWeight: 400 }}>(low confidence)</span>}</div>
+                  <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 2 }}>{z.elementDesc}</div>
+                  {z.nearbyText && <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 1, fontStyle: "italic" }}>Context: {z.nearbyText.slice(0, 80)}</div>}
+                </div>
+                <Badge color={meta.color}>{z.category}</Badge>
+              </label>
+            ); })}
+          </div>
+        )}
+
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Additional Actions <span style={{ fontSize: 12, color: "var(--dim)", fontWeight: 400, marginLeft: 8 }}>Actions the scan missed? One per line.</span></div>
+          <textarea value={userActions} onChange={e => setUserActions(e.target.value)} placeholder={"e.g.\nBook a villa\nSubscribe to newsletter\nDownload brochure"} rows={3}
+            style={{ width: "100%", padding: "12px 14px", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)", fontFamily: "var(--font-body)", fontSize: 13, resize: "vertical", outline: "none", lineHeight: 1.6 }}
+            onFocus={e => e.target.style.borderColor = "var(--emerald)"} onBlur={e => e.target.style.borderColor = "var(--border)"} />
+        </div>
+
+        {globalSignals.length > 0 && (
+          <Section title="Page-Level Agent Signals" count={globalSignals.length} defaultOpen={false}>
+            {globalSignals.map((sig, i) => <Row key={i} cols="24px 1fr"><span style={{ color: sig.present ? "var(--green)" : "var(--dim)", fontSize: 14, textAlign: "center" }}>{sig.present ? "\u2713" : "\u2014"}</span><div><div style={{ fontSize: 13, fontWeight: 600, color: sig.present ? "var(--text)" : "var(--muted)" }}>{sig.label}</div><div style={{ fontSize: 11, color: "var(--dim)", marginTop: 1 }}>{sig.detail}</div></div></Row>)}
+          </Section>
+        )}
+
+        <button onClick={runAudit} disabled={selected.size === 0 && !userActions.trim()} style={{
+          width: "100%", padding: "14px 24px", background: (selected.size > 0 || userActions.trim()) ? "var(--emerald)" : "var(--dim)",
+          color: "var(--bg)", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "var(--font-body)", cursor: (selected.size > 0 || userActions.trim()) ? "pointer" : "default", marginTop: 8,
+        }}>Audit {selected.size} Action{selected.size !== 1 ? "s" : ""}{userActions.trim() ? ` + ${userActions.split("\n").filter(a => a.trim()).length} custom` : ""} for Agent Readiness</button>
+      </div>
+    );
+  }
+
+  if (phase === "results" && auditResults) {
+    const goodCount = auditResults.filter(r => r.score === "good").length;
+    const partialCount = auditResults.filter(r => r.score === "partial" || r.score === "warning").length;
+    const poorCount = auditResults.filter(r => r.score === "poor" || r.score === "blocker").length;
+    const totalIssues = auditResults.reduce((sum, r) => sum + r.issues.length, 0);
+
+    return (
+      <div className="fade-in">
+        <button onClick={() => { setPhase("select"); setAuditResults(null); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, color: "var(--muted)", fontSize: 12, cursor: "pointer", padding: "6px 16px", fontFamily: "var(--font-body)", marginBottom: 16, fontWeight: 600 }}>{"\u2190"} Back to selection</button>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12, marginBottom: 24 }}>
+          {[{ n: goodCount, label: "Agent Ready", color: goodCount > 0 ? "var(--green)" : "var(--dim)" },{ n: partialCount, label: "Partial Issues", color: partialCount > 0 ? "var(--orange)" : "var(--dim)" },{ n: poorCount, label: "Not Ready / Blocked", color: poorCount > 0 ? "var(--red)" : "var(--green)" },{ n: totalIssues, label: "Total Issues", color: totalIssues > 0 ? "var(--orange)" : "var(--green)" }].map((card, i) => (
+            <div key={i} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", borderLeft: `3px solid ${card.color}` }}>
+              <div style={{ fontSize: 24, fontWeight: 700, color: card.color, fontFamily: "var(--font-mono)" }}>{card.n}</div>
+              <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 3, fontWeight: 600 }}>{card.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {auditResults.map((result, i) => { const { zone, issues, score } = result; const meta = getCatMeta(zone.category); const sColor = scoreColors[score] || "var(--muted)"; const sLabel = scoreLabels[score] || score; return (
+          <div key={i} className="fade-in" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, marginBottom: 12, overflow: "hidden", borderLeft: `3px solid ${sColor}` }}>
+            <div style={{ padding: "14px 18px", display: "flex", alignItems: "center", gap: 12, borderBottom: issues.length > 0 ? "1px solid var(--border)" : "none" }}>
+              <span style={{ fontSize: 20 }}>{meta.icon}</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 700 }}>{zone.label}</div>
+                <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 2 }}>{zone.elementDesc}{zone.source === "user-defined" && <span style={{ color: "var(--cyan)", marginLeft: 8 }}>(user-defined)</span>}</div>
+              </div>
+              <Badge color={sColor}>{sLabel}</Badge>
+            </div>
+            {issues.length > 0 && <div>{issues.map((issue, j) => (
+              <div key={j} style={{ padding: "12px 18px", borderBottom: j < issues.length - 1 ? "1px solid var(--border)" : "none", background: issue.severity === "high" ? "var(--red-bg)" : "transparent" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                  <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: sevColor(issue.severity) }} />
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{issue.title}</span>
+                  <Badge color={sevColor(issue.severity)}>{issue.severity}</Badge>
+                </div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginLeft: 14, lineHeight: 1.6 }}>{issue.detail}</div>
+                <div style={{ fontSize: 12, color: "var(--dim)", marginLeft: 14, marginTop: 4, padding: "9px 12px", background: "var(--surface2)", borderRadius: 6, borderLeft: "3px solid var(--orange)", lineHeight: 1.7 }}>
+                  <strong style={{ color: "var(--orange)" }}>Impact:</strong> {issue.impact}
+                </div>
+              </div>
+            ))}</div>}
+            {issues.length === 0 && <div style={{ padding: "0 18px 14px", fontSize: 12, color: "var(--green)" }}>{"\u2713"} No agent readiness issues found for this action.</div>}
+          </div>
+        ); })}
+
+        {globalSignals.length > 0 && (
+          <Section title="Page-Level Agent Signals" count={globalSignals.length} defaultOpen={false}>
+            {globalSignals.map((sig, i) => <Row key={i} cols="24px 1fr"><span style={{ color: sig.present ? "var(--green)" : "var(--dim)", fontSize: 14, textAlign: "center" }}>{sig.present ? "\u2713" : "\u2014"}</span><div><div style={{ fontSize: 13, fontWeight: 600, color: sig.present ? "var(--text)" : "var(--muted)" }}>{sig.label}</div><div style={{ fontSize: 11, color: "var(--dim)", marginTop: 1 }}>{sig.detail}</div></div></Row>)}
+          </Section>
+        )}
+      </div>
+    );
+  }
+  return null;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
    MAIN APP
    ═══════════════════════════════════════════════════════════════════ */
 function App() {
@@ -1082,14 +1512,16 @@ function App() {
   const [showHelp, setShowHelp] = useState(false);
   const [copyMsg, setCopyMsg] = useState("");
   const [crawlResults, setCrawlResults] = useState(null);
+  const [sourceDoc, setSourceDoc] = useState(null);
 
   const run = useCallback(() => {
     if (!sourceHtml.trim()) return;
     setResults(analyze(sourceHtml, renderedHtml));
+    setSourceDoc(parseDoc(sourceHtml));
     setTab("audit");
   }, [sourceHtml, renderedHtml]);
 
-  const clear = useCallback(() => { setSourceHtml(""); setRenderedHtml(""); setResults(null); }, []);
+  const clear = useCallback(() => { setSourceHtml(""); setRenderedHtml(""); setResults(null); setSourceDoc(null); }, []);
 
   const copyReport = useCallback(() => {
     if (!results) return;
@@ -1121,7 +1553,7 @@ function App() {
               LLM Visibility Analyzer
             </h1>
             <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 4, marginBottom: 0 }}>
-              See what AI systems can extract from your pages {"\u2014"} and whether they can access them at all.
+              See what AI systems can extract from your pages, whether they can access them, and whether agents can take actions.
             </p>
           </div>
           <button onClick={() => setShowHelp(true)} style={{
@@ -1139,7 +1571,8 @@ function App() {
         <div style={{ display: "flex", gap: 4, background: "var(--surface)", borderRadius: 10, padding: 4, border: "1px solid var(--border)", width: "fit-content", marginBottom: 24 }}>
           {[
             { id: "analysis", label: "Page Analysis", icon: "\uD83D\uDD0D" },
-            { id: "crawl", label: "Crawl Test", icon: "\uD83E\uDD16" },
+            { id: "agent", label: "Agent Readiness", icon: "\uD83E\uDD16" },
+            { id: "crawl", label: "Crawl Test", icon: "\uD83D\uDD17" },
           ].map(m => (
             <button key={m.id} onClick={() => setMode(m.id)} style={{
               padding: "9px 20px", fontSize: 13, fontWeight: 600, fontFamily: "var(--font-body)",
@@ -1320,6 +1753,11 @@ function App() {
               </div>
             )}
           </>
+        )}
+
+        {/* ═══ MODE: AGENT READINESS ═══ */}
+        {mode === "agent" && (
+          <AgentReadiness sourceDoc={sourceDoc} sourceHtml={sourceHtml} />
         )}
 
         {/* ═══ MODE: CRAWL TEST ═══ */}
