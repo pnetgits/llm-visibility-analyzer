@@ -1,0 +1,1913 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Page Visibility Analyzer</title>
+<meta name="description" content="See exactly what LLMs can extract from any web page — and what they miss.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0B0F13;
+    --surface: #141A22;
+    --surface2: #1A2130;
+    --border: #252D3A;
+    --border-light: #2E3A4A;
+    --text: #D8DEE9;
+    --muted: #7E8B9E;
+    --dim: #4E5A6E;
+    --accent: #4DA8DA;
+    --accent-dim: rgba(77,168,218,0.09);
+    --green: #4ADE80;
+    --green-bg: rgba(74,222,128,0.07);
+    --red: #F87171;
+    --red-bg: rgba(248,113,113,0.08);
+    --orange: #FBBF24;
+    --orange-bg: rgba(251,191,36,0.07);
+    --purple: #A78BFA;
+    --purple-bg: rgba(167,139,250,0.07);
+    --cyan: #22D3EE;
+    --emerald: #34D399;
+    --emerald-bg: rgba(52,211,153,0.07);
+    --emerald-dim: rgba(52,211,153,0.09);
+    --font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes slideIn { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  .fade-in { animation: fadeIn 0.3s ease-out; }
+  .slide-in { animation: slideIn 0.25s ease-out; }
+  .pulsing { animation: pulse 1.5s ease-in-out infinite; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.9/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useCallback, useRef, useEffect } = React;
+
+/* ═══════════════════════════════════════════════════════════════════
+   UTILITY HELPERS
+   ═══════════════════════════════════════════════════════════════════ */
+function strip(s) { return (s || "").replace(/\s+/g, " ").trim(); }
+function trunc(s, n = 100) { return !s ? "" : s.length > n ? s.slice(0, n) + "\u2026" : s; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   PARSERS — extract structured data from a DOM document
+   ═══════════════════════════════════════════════════════════════════ */
+function parseDoc(html) {
+  return new DOMParser().parseFromString(html || "<html><body></body></html>", "text/html");
+}
+
+function extractMeta(doc) {
+  const items = [];
+  const t = doc.querySelector("title");
+  if (t) items.push({ name: "title", content: strip(t.textContent) });
+  const c = doc.querySelector('link[rel="canonical"]');
+  if (c) items.push({ name: "canonical", content: c.getAttribute("href") || "" });
+  doc.querySelectorAll("meta").forEach((m) => {
+    const name = m.getAttribute("name") || m.getAttribute("property") || m.getAttribute("http-equiv");
+    const content = m.getAttribute("content");
+    if (name && content) items.push({ name, content });
+  });
+  return items;
+}
+
+function extractSchema(doc) {
+  const items = [];
+  doc.querySelectorAll('script[type="application/ld+json"]').forEach((s) => {
+    try { items.push({ parsed: JSON.parse(s.textContent), raw: s.textContent.trim(), error: false }); }
+    catch { items.push({ parsed: null, raw: s.textContent.trim().slice(0, 300), error: true }); }
+  });
+  return items;
+}
+
+function extractHeadings(doc) {
+  const items = [];
+  doc.querySelectorAll("h1,h2,h3,h4,h5,h6").forEach((h) => {
+    let text = "";
+    h.childNodes.forEach((n) => {
+      if (n.nodeType === Node.TEXT_NODE) text += n.textContent;
+      else if (n.nodeType === Node.ELEMENT_NODE && !["style","script","link"].includes(n.tagName.toLowerCase())) {
+        text += n.textContent;
+      }
+    });
+    text = strip(text);
+    if (text.length > 1 && text.length < 500 && !/\{[^}]*!important/.test(text) && !/border-radius|font-family|background-color/.test(text)) {
+      items.push({ level: h.tagName, text });
+    }
+  });
+  return items;
+}
+
+function extractLinks(doc) {
+  const items = [], seen = new Set();
+  doc.querySelectorAll("a[href]").forEach((a) => {
+    const href = a.getAttribute("href") || "";
+    const text = strip(a.textContent).slice(0, 150);
+    if (!href || href.startsWith("javascript:") || href === "#") return;
+    const key = href + "|" + text;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push({ href, text: text || "[no anchor text]" });
+  });
+  return items;
+}
+
+function extractImages(doc) {
+  const items = [], seen = new Set();
+  doc.querySelectorAll("img").forEach((img) => {
+    const src = img.getAttribute("src") || img.getAttribute("data-src") || "";
+    const alt = img.getAttribute("alt") || "";
+    if (!src || seen.has(src)) return;
+    seen.add(src);
+    items.push({ src, alt, hasAlt: alt.length > 0 });
+  });
+  return items;
+}
+
+function extractText(doc) {
+  const blocks = [], seen = new Set();
+  if (!doc.body) return blocks;
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      const p = node.parentElement;
+      if (!p) return NodeFilter.FILTER_REJECT;
+      const tag = p.tagName?.toLowerCase();
+      if (["script","style","noscript","template","svg"].includes(tag)) return NodeFilter.FILTER_REJECT;
+      return node.textContent.trim().length < 5 ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  while (walker.nextNode()) {
+    const text = strip(walker.currentNode.textContent);
+    if (text.length >= 12 && !seen.has(text)) {
+      seen.add(text);
+      blocks.push({ text, tag: walker.currentNode.parentElement?.tagName?.toLowerCase() || "?" });
+    }
+  }
+  return blocks;
+}
+
+function extractDataAttrs(doc) {
+  const items = [];
+  if (!doc.body) return items;
+  doc.body.querySelectorAll("*").forEach((el) => {
+    Array.from(el.attributes).forEach((attr) => {
+      if (!attr.name.startsWith("data-")) return;
+      const val = attr.value.trim();
+      if (!val.startsWith("{") && !val.startsWith("[")) return;
+      try {
+        items.push({ element: el.tagName.toLowerCase(), attr: attr.name, data: JSON.parse(val) });
+      } catch {
+        try {
+          const decoded = val.replace(/&quot;/g,'"').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+          items.push({ element: el.tagName.toLowerCase(), attr: attr.name, data: JSON.parse(decoded) });
+        } catch { /* skip */ }
+      }
+    });
+  });
+  return items;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LAYER 1 — SOURCE AUDIT (flag problems)
+   ═══════════════════════════════════════════════════════════════════ */
+function auditSource(doc, html) {
+  const issues = [];
+
+  doc.querySelectorAll("[onclick]").forEach((el) => {
+    const h = el.getAttribute("onclick") || "";
+    if (/navigate|router\.push|location\.href|window\.open|goTo|history\.push/i.test(h)) {
+      issues.push({
+        severity: "high", type: "fake-link",
+        title: "JS onclick navigation \u2014 not a real link",
+        detail: `<${el.tagName.toLowerCase()} onclick="${trunc(h,70)}"> "${trunc(strip(el.textContent),50)}"`,
+        why: "LLMs can't execute JavaScript. This navigation only works in a browser \u2014 LLMs will never discover the destination URL.",
+      });
+    }
+  });
+
+  (html.match(/onClick\s*=\s*\{[^}]*(navigate|router\.push|history\.push)[^}]*\}/gi) || []).forEach((m) => {
+    issues.push({
+      severity: "high", type: "fake-link",
+      title: "React onClick navigation pattern",
+      detail: trunc(m, 120),
+      why: "JS framework navigation handler. The URL is embedded in code, not in an <a href> \u2014 LLMs won't follow it.",
+    });
+  });
+
+  doc.querySelectorAll("button[onclick]").forEach((btn) => {
+    const h = btn.getAttribute("onclick") || "";
+    if (/product|page|link|url|navigate|route/i.test(h)) {
+      issues.push({
+        severity: "high", type: "fake-link",
+        title: "Button with JS navigation",
+        detail: `<button onclick="${trunc(h,60)}">${trunc(strip(btn.textContent),40)}</button>`,
+        why: "Buttons with onclick handlers look clickable to users but are invisible navigation paths for LLMs.",
+      });
+    }
+  });
+
+  doc.querySelectorAll("a[href]").forEach((a) => {
+    const style = (a.getAttribute("style")||"") + " " + (a.parentElement?.getAttribute("style")||"");
+    if (/display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0[^.]|height\s*:\s*0[^.]|font-size\s*:\s*0/i.test(style)) {
+      issues.push({
+        severity: "medium", type: "hidden-link",
+        title: "Link hidden via inline CSS",
+        detail: `<a href="${trunc(a.getAttribute("href"),60)}" style="${trunc(a.getAttribute("style"),60)}">${trunc(strip(a.textContent),40)}</a>`,
+        why: "Links hidden with inline CSS may be ignored by search engines and LLMs that detect cloaking patterns.",
+      });
+    }
+  });
+
+  doc.querySelectorAll('a[href][aria-hidden="true"]').forEach((a) => {
+    const href = a.getAttribute("href") || "";
+    if (href && href !== "#") {
+      issues.push({
+        severity: "low", type: "hidden-link",
+        title: 'Link with aria-hidden="true"',
+        detail: `<a href="${trunc(href,60)}" aria-hidden="true">${trunc(strip(a.textContent),40)}</a>`,
+        why: "aria-hidden tells assistive tech to ignore this element. Some LLMs may also skip it.",
+      });
+    }
+  });
+
+  doc.querySelectorAll("noscript").forEach((ns) => {
+    if (/display\s*:\s*none/i.test(ns.innerHTML)) {
+      issues.push({
+        severity: "medium", type: "noscript-hide",
+        title: "Noscript block hides page content when JS is off",
+        detail: "A <noscript> tag contains CSS that hides other page elements when JavaScript is disabled.",
+        why: "This doesn't actually hide content from LLMs (they don't apply CSS). But it makes manual testing misleading.",
+      });
+    }
+  });
+
+  const badChars = {
+    "\u2019": { name: "curly apostrophe (right single quote)", code: "U+2019", fix: "remove or replace with nothing" },
+    "\u2018": { name: "curly apostrophe (left single quote)", code: "U+2018", fix: "remove or replace with nothing" },
+    "\u201C": { name: "left double smart quote", code: "U+201C", fix: "remove" },
+    "\u201D": { name: "right double smart quote", code: "U+201D", fix: "remove" },
+    "\u2014": { name: "em dash", code: "U+2014", fix: "replace with a single hyphen (-)" },
+    "\u2013": { name: "en dash", code: "U+2013", fix: "replace with a single hyphen (-)" },
+    "\u00A0": { name: "non-breaking space", code: "U+00A0", fix: "replace with a regular hyphen or remove" },
+    "\u200B": { name: "zero-width space", code: "U+200B", fix: "remove" },
+  };
+  const badCharPattern = /[\u2018\u2019\u201C\u201D\u2014\u2013\u00A0\u200B]/;
+  doc.querySelectorAll("a[href]").forEach((a) => {
+    const href = a.getAttribute("href") || "";
+    if (badCharPattern.test(href)) {
+      const found = [];
+      for (const [char, info] of Object.entries(badChars)) {
+        if (href.includes(char)) found.push({ char, ...info });
+      }
+      let cleanHref = href;
+      for (const [char, info] of Object.entries(badChars)) {
+        if (info.fix.includes("hyphen")) cleanHref = cleanHref.replaceAll(char, "-");
+        else cleanHref = cleanHref.replaceAll(char, "");
+      }
+      cleanHref = cleanHref.replace(/-{2,}/g, "-").replace(/-\//g, "/").replace(/\/-/g, "/");
+      let highlighted = href;
+      for (const f of found) highlighted = highlighted.replaceAll(f.char, `\u2192 ${f.char} \u2190`);
+      const charList = found.map(f => `"${f.char}" \u2014 ${f.name} (${f.code}) \u2014 ${f.fix}`).join("\n");
+      issues.push({
+        severity: "high", type: "invalid-url",
+        title: `Link URL contains invalid character${found.length > 1 ? "s" : ""}: ${found.map(f => f.name).join(", ")}`,
+        detail: `href="${trunc(highlighted, 140)}"\n\nProblem character${found.length > 1 ? "s" : ""}:\n${charList}\n\nSuggested clean URL: ${trunc(cleanHref, 120)}`,
+        why: `The character ${found.map(f => `"${f.char}" (${f.name})`).join(" and ")} is not a valid URL character. LLMs and crawlers will likely get a 404.`,
+      });
+    }
+  });
+
+  doc.querySelectorAll('[data-react-root],[id="root"],[id="app"],[id="__next"],[data-controller],[data-component]').forEach((el) => {
+    if (strip(el.textContent).length < 20) {
+      issues.push({
+        severity: "medium", type: "empty-container",
+        title: "Empty JS application container",
+        detail: `<${el.tagName.toLowerCase()} id="${el.id||""}" class="${trunc(el.className,50)}"> \u2014 ${strip(el.textContent).length} chars of content`,
+        why: "This container is likely populated by JavaScript after page load. Any content rendered inside it will be invisible to LLMs.",
+      });
+    }
+  });
+
+  const jsonLinkRe = /"(?:href|url|link|productLink|slug)"\s*:\s*"(\/[^"]+)"/g;
+  let jm;
+  const flaggedJsonLinks = new Set();
+  while ((jm = jsonLinkRe.exec(html)) !== null) {
+    const url = jm[1];
+    if (flaggedJsonLinks.has(url)) continue;
+    if (!doc.querySelector(`a[href="${url}"], a[href*="${url}"]`)) {
+      flaggedJsonLinks.add(url);
+      issues.push({
+        severity: "medium", type: "json-only-link",
+        title: "URL in JSON data but no matching crawlable link",
+        detail: `URL: ${trunc(url,80)} \u2014 found in JSON but no <a href> equivalent`,
+        why: "This URL exists in embedded data but not as a real hyperlink. LLMs may read the JSON but won't recognise it as a navigable link.",
+      });
+    }
+  }
+
+  doc.querySelectorAll('[class*="cookie"],[class*="consent"],[class*="gdpr"],[id*="cookie"],[id*="consent"]').forEach((el) => {
+    const text = strip(el.textContent);
+    if (text.length > 50) {
+      issues.push({
+        severity: "low", type: "consent-content",
+        title: "Content inside cookie/consent wrapper",
+        detail: `<${el.tagName.toLowerCase()} class="${trunc(el.className,50)}"> contains ${text.length} chars`,
+        why: "Content inside consent-gated containers may not be accessible to all crawlers.",
+      });
+    }
+  });
+
+  doc.querySelectorAll("[data-background-image],[data-bg],[data-src-bg],[data-bg-src]").forEach((el) => {
+    const bgUrl = el.getAttribute("data-background-image") || el.getAttribute("data-bg") || el.getAttribute("data-src-bg") || el.getAttribute("data-bg-src") || "";
+    if (bgUrl) {
+      issues.push({
+        severity: "medium", type: "js-image",
+        title: "Image loaded via JS data attribute (not visible to LLMs)",
+        detail: `<${el.tagName.toLowerCase()}> data-background-image="${trunc(bgUrl, 80)}"`,
+        why: "This image URL is in a data attribute that requires JavaScript to apply as a CSS background. LLMs won't see this image at all.",
+      });
+    }
+  });
+
+  const nofollowLinks = [];
+  doc.querySelectorAll('a[rel*="nofollow"]').forEach((a) => {
+    const href = a.getAttribute("href") || "";
+    const text = strip(a.textContent).slice(0, 60);
+    if (href && href !== "#") nofollowLinks.push({ href, text });
+  });
+  if (nofollowLinks.length > 0) {
+    issues.push({
+      severity: "low", type: "nofollow-links",
+      title: `${nofollowLinks.length} link(s) with rel="nofollow"`,
+      detail: nofollowLinks.slice(0, 5).map(l => `${trunc(l.href,50)} \u2014 "${trunc(l.text,30)}"`).join(" | "),
+      why: 'Links with rel="nofollow" tell search engines not to pass link equity.',
+    });
+  }
+
+  doc.querySelectorAll('[class*="trustpilot"],[data-businessunit-id],[class*="yotpo"],[class*="bazaarvoice"],[class*="review"],[id*="disqus"],[class*="elfsight"]').forEach((el) => {
+    const text = strip(el.textContent);
+    if (text.length < 30) {
+      const widgetName = el.className?.includes("trustpilot") ? "Trustpilot" :
+        el.className?.includes("yotpo") ? "Yotpo" :
+        el.className?.includes("bazaarvoice") ? "Bazaarvoice" :
+        el.id?.includes("disqus") ? "Disqus" : "Third-party widget";
+      issues.push({
+        severity: "medium", type: "widget-placeholder",
+        title: `${widgetName} widget placeholder (empty until JS loads)`,
+        detail: `<${el.tagName.toLowerCase()} class="${trunc(el.className,60)}"> \u2014 ${text.length} chars of content`,
+        why: `This ${widgetName} widget is an empty container populated by external JavaScript. Reviews, ratings, and UGC loaded this way are invisible to LLMs.`,
+      });
+    }
+  });
+
+  doc.querySelectorAll("img[data-src]:not([src])").forEach((img) => {
+    const dataSrc = img.getAttribute("data-src") || "";
+    issues.push({
+      severity: "medium", type: "lazy-no-src",
+      title: "Image with data-src but no src attribute",
+      detail: `<img data-src="${trunc(dataSrc,70)}"> \u2014 requires JS to load`,
+      why: "This image has no src attribute \u2014 only data-src which requires JavaScript to swap in.",
+    });
+  });
+
+  doc.querySelectorAll("[data-bv-show],[data-bv-product-id]").forEach((el) => {
+    const bvType = el.getAttribute("data-bv-show") || "reviews";
+    const text = strip(el.textContent);
+    if (text.length < 50) {
+      issues.push({
+        severity: "high", type: "widget-placeholder",
+        title: `Bazaarvoice "${bvType}" widget (empty \u2014 requires JS to load)`,
+        detail: `<${el.tagName.toLowerCase()} data-bv-show="${bvType}"> \u2014 ${text.length} chars of content.`,
+        why: "Bazaarvoice review widgets are empty placeholder elements populated by external JavaScript. All review content is invisible to LLMs.",
+      });
+    }
+  });
+
+  doc.querySelectorAll('[class*="read-more"],[class*="readmore"],[class*="show-more"],[class*="showmore"],[data-readmore],[class*="truncat"],[class*="text-clamp"],[class*="line-clamp"],[class*="ellipsis"]').forEach((el) => {
+    const text = strip(el.textContent);
+    if (text.length > 20) {
+      issues.push({
+        severity: "medium", type: "truncated-content",
+        title: 'Content behind a "read more" / truncation pattern',
+        detail: `<${el.tagName.toLowerCase()} class="${trunc(el.className,60)}"> \u2014 visible text: "${trunc(text,80)}"`,
+        why: 'This content uses a "read more" expand pattern. LLMs will only see the truncated/visible portion.',
+      });
+    }
+  });
+  doc.querySelectorAll('[style*="line-clamp"],[style*="webkit-line-clamp"],[style*="max-height"][style*="overflow"]').forEach((el) => {
+    const text = strip(el.textContent);
+    if (text.length > 30) {
+      issues.push({
+        severity: "low", type: "truncated-content",
+        title: "Content visually truncated via CSS",
+        detail: `<${el.tagName.toLowerCase()} style="${trunc(el.getAttribute("style"),60)}"> \u2014 ${text.length} chars of text`,
+        why: "This content is visually truncated via CSS. The full text IS in the HTML, so LLMs can read it.",
+      });
+    }
+  });
+
+  doc.querySelectorAll("iframe[data-src]:not([src]), [data-video-url], [data-video-id], [class*='video-placeholder'], [class*='video-container']:empty").forEach((el) => {
+    const videoUrl = el.getAttribute("data-src") || el.getAttribute("data-video-url") || el.getAttribute("data-video-id") || "";
+    issues.push({
+      severity: "medium", type: "js-video",
+      title: "Video embed requires JS to load",
+      detail: `<${el.tagName.toLowerCase()} ${videoUrl ? `data-src="${trunc(videoUrl,60)}"` : `class="${trunc(el.className,60)}"`}>`,
+      why: "This video element needs JavaScript to initialise. LLMs won't see the video content.",
+    });
+  });
+
+  doc.querySelectorAll("[data-component],[data-widget],[data-module],[data-carousel],[data-slider],[data-recommendations]").forEach((el) => {
+    const text = strip(el.textContent);
+    const tagName = el.tagName.toLowerCase();
+    if (text.length < 15 && tagName !== "script" && tagName !== "link") {
+      const componentName = el.getAttribute("data-component") || el.getAttribute("data-widget") || el.getAttribute("data-module") || el.getAttribute("data-carousel") || el.getAttribute("data-slider") || el.getAttribute("data-recommendations") || "unknown";
+      issues.push({
+        severity: "medium", type: "empty-widget",
+        title: `Empty JS component: "${trunc(componentName,40)}"`,
+        detail: `<${tagName} data-component="${trunc(componentName,50)}"> \u2014 ${text.length} chars of content`,
+        why: "This JavaScript component placeholder gets populated after page load. Content loaded this way is invisible to LLMs.",
+      });
+    }
+  });
+
+  // Deduplicate
+  const deduped = [];
+  const seen = new Map();
+  for (const issue of issues) {
+    let key = issue.type + "|";
+    if (issue.type === "invalid-url") {
+      const hrefMatch = issue.detail.match(/href="([^"]+)"/);
+      key += hrefMatch ? hrefMatch[1] : issue.detail;
+    } else if (issue.type === "fake-link" || issue.type === "hidden-link") {
+      const hrefMatch = issue.detail.match(/href="([^"]+)"/) || issue.detail.match(/onclick="([^"]+)"/);
+      key += hrefMatch ? hrefMatch[1] : issue.detail;
+    } else if (issue.type === "js-image") {
+      const urlMatch = issue.detail.match(/data-background-image="([^"]+)"/);
+      key += urlMatch ? urlMatch[1] : issue.detail;
+    } else if (issue.type === "widget-placeholder") {
+      key += issue.title;
+    } else {
+      key += issue.detail;
+    }
+    if (seen.has(key)) { seen.get(key).count += 1; }
+    else { const entry = { ...issue, count: 1 }; seen.set(key, entry); deduped.push(entry); }
+  }
+  return deduped;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LAYER 3 — MEANINGFUL DIFF
+   ═══════════════════════════════════════════════════════════════════ */
+function computeDiff(src, ren) {
+  if (!ren) return null;
+  const normUrl = (href) => {
+    let u = (href || "").trim().replace(/^https?:\/\/[^\/]+/i, "");
+    if (u.length > 1 && u.endsWith("/")) u = u.slice(0, -1);
+    u = u.replace(/[?&](utm_[^&=]+=|ref=|source=|fbclid=|gclid=|mc_[^&=]+=)[^&]*/gi, "");
+    return u.replace(/\?$/, "").replace(/\?&/, "?").toLowerCase();
+  };
+  const normImg = (src) => {
+    let u = (src || "").trim().replace(/^https?:\/\/[^\/]+/i, "");
+    u = u.replace(/[?&](w|h|width|height|size|resize|quality|q|format|f)=[^&]*/gi, "");
+    return u.replace(/\?$/, "").toLowerCase();
+  };
+
+  const srcTexts = new Set(src.text.map(t => t.text));
+  const srcHrefs = new Set(src.links.map(l => normUrl(l.href)));
+  const srcH = new Set(src.headings.map(h => h.level + h.text));
+  const srcSchemaKeys = new Set(src.schema.map(s => JSON.stringify(s.parsed?.["@type"] || s.raw)));
+  const srcImgs = new Set(src.images.map(i => normImg(i.src)));
+
+  let addedText = ren.text.filter(t => !srcTexts.has(t.text));
+  let addedLinks = ren.links.filter(l => !srcHrefs.has(normUrl(l.href)));
+  const addedHeadings = ren.headings.filter(h => !srcH.has(h.level + h.text));
+  const addedSchema = ren.schema.filter(s => !srcSchemaKeys.has(JSON.stringify(s.parsed?.["@type"] || s.raw)));
+  const addedImages = ren.images.filter(i => !srcImgs.has(normImg(i.src)));
+
+  const extRe = /chrome-extension:\/\/|moz-extension:\/\//i;
+  const trackRe = /gtm|analytics|tracking|dataLayer|fbq|_ga|cookie|gorgias|ometria|widget|rollbar|doubleclick|google-analytics|googletagmanager|hotjar|clarity\.ms|hubspot|segment\.io|mixpanel|amplitude/i;
+  const ttsRe = /^🇺🇸|^🇬🇧|Microsoft\s+(David|George|Hazel)|Google\s+(US|UK)|text.to.speech|reader.?mode|OpenDyslexic/i;
+  const extUiRe = /chrome-extension|moz-extension|readermode\.io|Settings\s*page|Share\s*to\s*a\s*new\s*group|Default\s*translation\s*language/i;
+
+  addedText = addedText.filter(t => t.text.length >= 20 && !trackRe.test(t.text) && !ttsRe.test(t.text) && !extUiRe.test(t.text));
+  addedLinks = addedLinks.filter(l => !extRe.test(l.href) && !trackRe.test(l.href) && !l.href.startsWith("data:") && !l.href.startsWith("blob:") && !l.href.startsWith("#/") && !/readermode\.io|chrome\.google\.com\/webstore/i.test(l.href));
+  let addedImgs = addedImages.filter(i => !extRe.test(i.src) && !trackRe.test(i.src) && !i.src.startsWith("data:") && !i.src.startsWith("blob:"));
+
+  return {
+    text: addedText, links: addedLinks,
+    headings: addedHeadings.filter(h => !extUiRe.test(h.text) && !ttsRe.test(h.text)),
+    schema: addedSchema, images: addedImgs,
+  };
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   LAYER 4 — PROMOTE DIFF TO ISSUES
+   ═══════════════════════════════════════════════════════════════════ */
+function promoteDiffToIssues(diff) {
+  if (!diff) return [];
+  const issues = [];
+  const productLinks = diff.links.filter(l => /\/product[s]?\//i.test(l.href));
+  if (productLinks.length > 0) issues.push({ severity: "high", type: "js-only-product-links", title: `${productLinks.length} product link(s) only load via JavaScript`, detail: productLinks.slice(0,8).map(l => `${trunc(l.href,60)} \u2014 "${trunc(l.text,40)}"`).join("\n"), why: "These product links are completely invisible to LLMs.", count: 1 });
+  const contentLinks = diff.links.filter(l => !(/\/product[s]?\//i.test(l.href)) && !(/youtube|instagram|twitter|facebook|tiktok|pinterest|linkedin/i.test(l.href)));
+  if (contentLinks.length > 0) issues.push({ severity: "medium", type: "js-only-content-links", title: `${contentLinks.length} content link(s) only load via JavaScript`, detail: contentLinks.slice(0,6).map(l => `${trunc(l.href,60)} \u2014 "${trunc(l.text,40)}"`).join("\n"), why: "These internal/content links are only in the rendered DOM. LLMs won't discover these pages.", count: 1 });
+  const socialLinks = diff.links.filter(l => /youtube|instagram|twitter|facebook|tiktok|pinterest|linkedin/i.test(l.href));
+  if (socialLinks.length > 0) issues.push({ severity: "low", type: "js-only-social-links", title: `${socialLinks.length} social link(s) only load via JavaScript`, detail: socialLinks.map(l => trunc(l.href,60)).join("\n"), why: "Social profile links are JS-only. Low impact.", count: 1 });
+  const highH = diff.headings.filter(h => h.level === "H1" || h.level === "H2");
+  if (highH.length > 0) issues.push({ severity: "high", type: "js-only-headings-high", title: `${highH.length} key heading(s) only exist after JavaScript runs`, detail: highH.map(h => `${h.level}: "${trunc(h.text,60)}"`).join("\n"), why: "H1/H2 headings invisible to LLMs means major page sections are missing.", count: 1 });
+  const medH = diff.headings.filter(h => h.level !== "H1" && h.level !== "H2");
+  if (medH.length > 0) issues.push({ severity: "medium", type: "js-only-headings-med", title: `${medH.length} sub-heading(s) only exist after JavaScript runs`, detail: medH.map(h => `${h.level}: "${trunc(h.text,60)}"`).join("\n"), why: "Sub-headings that only appear after JS execution.", count: 1 });
+  const mt = diff.text.filter(t => t.text.length > 30);
+  const pt = mt.filter(t => /price|£|\$|€|add to|basket|cart|delivery|stock|size/i.test(t.text));
+  const ot = mt.filter(t => !/price|£|\$|€|add to|basket|cart|delivery|stock|size/i.test(t.text));
+  if (pt.length > 0) issues.push({ severity: "high", type: "js-only-product-content", title: `${pt.length} product-related text block(s) only load via JavaScript`, detail: pt.slice(0,5).map(t => `"${trunc(t.text,80)}"`).join("\n"), why: "Product information only in rendered DOM. LLMs cannot see it.", count: 1 });
+  if (ot.length > 3) issues.push({ severity: "medium", type: "js-only-text-content", title: `${ot.length} text block(s) only load via JavaScript`, detail: ot.slice(0,5).map(t => `"${trunc(t.text,80)}"`).join("\n"), why: "Text content only appears after JS execution.", count: 1 });
+  if (diff.schema.length > 0) issues.push({ severity: "high", type: "js-only-schema", title: `${diff.schema.length} structured data block(s) only exist after JavaScript runs`, detail: diff.schema.map(s => `@type: ${s.parsed?.["@type"] || "unknown"}`).join("\n"), why: "JSON-LD injected by JavaScript is invisible to LLMs.", count: 1 });
+  if (diff.images.length > 3) issues.push({ severity: "medium", type: "js-only-images", title: `${diff.images.length} image(s) only load via JavaScript`, detail: diff.images.slice(0,5).map(i => `${trunc(i.src,60)} \u2014 alt: "${trunc(i.alt,30) || "none"}"`).join("\n"), why: "These images only appear after JavaScript runs.", count: 1 });
+  return issues;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   AGENT READINESS — Action Zone Detection & Audit
+   ═══════════════════════════════════════════════════════════════════ */
+function getNearbyText(el, maxChars = 200) {
+  const parts = [];
+  let walker = el.parentElement;
+  for (let i = 0; i < 4 && walker; i++) {
+    const heading = walker.querySelector("h1,h2,h3,h4,h5,h6");
+    if (heading) { parts.push(heading.textContent.trim()); break; }
+    walker = walker.parentElement;
+  }
+  const legend = el.closest("fieldset")?.querySelector("legend")?.textContent?.trim();
+  if (legend) parts.push(legend);
+  const ariaLabel = el.getAttribute("aria-label");
+  if (ariaLabel) parts.push(ariaLabel);
+  return parts.join(" | ").slice(0, maxChars);
+}
+
+function classifyForm(form) {
+  const html = form.outerHTML.toLowerCase();
+  const text = form.textContent.toLowerCase();
+  const inputs = Array.from(form.querySelectorAll("input,select,textarea"));
+  const inputTypes = inputs.map(i => i.getAttribute("type") || "text");
+  const inputNames = inputs.map(i => (i.getAttribute("name") || i.getAttribute("id") || "").toLowerCase());
+  const allNames = inputNames.join(" ");
+  const buttonText = Array.from(form.querySelectorAll("button,input[type=submit]")).map(b => b.textContent?.trim() || b.value || "").join(" ").toLowerCase();
+
+  if (form.getAttribute("role") === "search" || inputTypes.includes("search") || /search|query|q\b/.test(allNames) && inputs.length <= 2) return { category: "search", label: "Site search", confidence: 0.95 };
+  if (inputTypes.includes("password") && /log.?in|sign.?in/i.test(text + " " + buttonText)) return { category: "login", label: "Login / Sign in", confidence: 0.95 };
+  if (inputTypes.includes("password") && /register|sign.?up|create.?account/i.test(text + " " + buttonText)) return { category: "registration", label: "Account registration", confidence: 0.9 };
+  if (inputs.length <= 3 && (inputTypes.includes("email") || /email/.test(allNames)) && !inputTypes.includes("password") && /subscri|newsletter|updates|sign.?up|mailing|notify/i.test(text + " " + buttonText + " " + html)) return { category: "newsletter", label: "Newsletter / email signup", confidence: 0.9 };
+  if (/book|reserv|availab|check.?in|check.?out|arrival|depart|guest/i.test(text + " " + allNames + " " + buttonText) || (inputTypes.includes("date") && /date|arrival|depart|check/i.test(allNames))) return { category: "booking", label: "Booking / reservation form", confidence: 0.85 };
+  if (/contact|enquir|inquir|get.?in.?touch|message|feedback/i.test(text + " " + buttonText + " " + html) || (/name/.test(allNames) && /email/.test(allNames) && /message|comment|body|text/.test(allNames))) return { category: "contact", label: "Contact / enquiry form", confidence: 0.85 };
+  if (/checkout|payment|pay.?now|place.?order|billing|shipping.?address/i.test(text + " " + buttonText + " " + allNames)) return { category: "checkout", label: "Checkout / payment", confidence: 0.9 };
+  if (/add.?to.?(cart|basket|bag)|buy.?now/i.test(buttonText + " " + text)) return { category: "add-to-cart", label: "Add to cart / purchase", confidence: 0.9 };
+  if (/download|get.?(the|your|our|free)|access|whitepaper|ebook|guide|brochure/i.test(text + " " + buttonText)) return { category: "download", label: "Download / lead generation", confidence: 0.8 };
+  if (/appointment|schedule|calendar|time.?slot|consultation/i.test(text + " " + allNames + " " + buttonText)) return { category: "appointment", label: "Appointment / scheduling", confidence: 0.85 };
+  if (/filter|sort|refine|facet/i.test(html) && form.querySelectorAll("input[type=checkbox],input[type=radio],select").length > 3) return { category: "filter", label: "Product/content filter", confidence: 0.7, skip: true };
+  if (inputs.length > 0) return { category: "other-form", label: "Form (unclassified)", confidence: 0.5 };
+  return null;
+}
+
+function classifyCTA(el) {
+  const text = (el.textContent || "").trim().toLowerCase();
+  const ariaLabel = (el.getAttribute("aria-label") || "").toLowerCase();
+  const combined = text + " " + ariaLabel;
+  if (text.length < 2 && !ariaLabel) return null;
+  if (/^(home|about|blog|news|faq|terms|privacy|sitemap|menu|close|back|next|prev)$/i.test(text)) return null;
+  if (/add.?to.?(cart|basket|bag)|buy.?now|purchase/i.test(combined)) return { category: "add-to-cart", label: `Add to cart: "${text.slice(0,40)}"`, confidence: 0.95 };
+  if (/^(book|reserve|check.?availab|make.?a?.?reserv|book.?now|reserve.?now)/i.test(combined)) return { category: "booking", label: `Booking CTA: "${text.slice(0,40)}"`, confidence: 0.9 };
+  if (/^(subscribe|sign.?up|join|get.?updates|notify)/i.test(combined)) return { category: "newsletter", label: `Subscribe CTA: "${text.slice(0,40)}"`, confidence: 0.85 };
+  if (/^(contact|get.?in.?touch|enquire|request.?a?.?quote|send.?message|email.?us)/i.test(combined)) return { category: "contact", label: `Contact CTA: "${text.slice(0,40)}"`, confidence: 0.85 };
+  if (/^(download|get.?(the|your|our|free)|access.?(the|your))/i.test(combined)) return { category: "download", label: `Download CTA: "${text.slice(0,40)}"`, confidence: 0.85 };
+  if (/^(schedule|book.?a?.?(call|demo|appointment|consultation)|request.?a?.?(demo|call))/i.test(combined)) return { category: "appointment", label: `Appointment CTA: "${text.slice(0,40)}"`, confidence: 0.85 };
+  if (/^(log.?in|sign.?in|create.?account|register|sign.?up|get.?started)$/i.test(text)) return { category: "login", label: `Auth CTA: "${text.slice(0,40)}"`, confidence: 0.8 };
+  if (/^(apply|submit|request|claim|redeem|activate)/i.test(combined)) return { category: "other-action", label: `Action CTA: "${text.slice(0,40)}"`, confidence: 0.75 };
+  return null;
+}
+
+function detectActionZones(doc, html) {
+  const zones = [];
+  let idCounter = 0;
+  const makeId = () => `action-${++idCounter}`;
+
+  // 1. FORMS
+  doc.querySelectorAll("form").forEach(form => {
+    const classification = classifyForm(form);
+    if (!classification || classification.skip) return;
+    const inputs = Array.from(form.querySelectorAll("input:not([type=hidden]),select,textarea"));
+    const buttons = Array.from(form.querySelectorAll("button,input[type=submit],input[type=button]"));
+    zones.push({ id: makeId(), type: "form", category: classification.category, label: classification.label, confidence: classification.confidence, elementDesc: `<form> with ${inputs.length} input(s), ${buttons.length} button(s)`, elementSnippet: `<form${form.id ? ` id="${form.id}"` : ""}${form.className ? ` class="${form.className.toString().slice(0,50)}"` : ""}${form.action ? ` action="${form.action.slice(0,60)}"` : ""}>`, nearbyText: getNearbyText(form), element: form, inputCount: inputs.length, buttonCount: buttons.length, source: "auto-detected" });
+  });
+
+  // 2. STANDALONE CTAs
+  const seenCTAText = new Set();
+  doc.querySelectorAll("a[href], button").forEach(el => {
+    if (el.closest("form")) return;
+    if (el.closest("nav") || el.closest("[role='navigation']")) return;
+    const isInHeader = el.closest("header") && !el.closest("main");
+    const isInFooter = el.closest("footer");
+    const classification = classifyCTA(el);
+    if (!classification) return;
+    const dedupeKey = classification.category + "|" + (el.textContent || "").trim().toLowerCase().slice(0, 30);
+    if (seenCTAText.has(dedupeKey)) return;
+    seenCTAText.add(dedupeKey);
+    const confidence = (isInHeader || isInFooter) ? classification.confidence * 0.7 : classification.confidence;
+    const tag = el.tagName.toLowerCase();
+    const href = el.getAttribute("href") || "";
+    zones.push({ id: makeId(), type: "cta", category: classification.category, label: classification.label, confidence, elementDesc: `<${tag}>${tag === "a" ? ` href="${href.slice(0,50)}"` : ""}`, elementSnippet: `<${tag}${el.className ? ` class="${el.className.toString().slice(0,50)}"` : ""}${href ? ` href="${href.slice(0,60)}"` : ""}>${(el.textContent || "").trim().slice(0,40)}</${tag}>`, nearbyText: getNearbyText(el), element: el, isLink: tag === "a", href, source: "auto-detected" });
+  });
+
+  // 3. THIRD-PARTY WIDGETS
+  const widgetPatterns = [
+    { selector: 'iframe[src*="fareharbor"]', category: "booking", name: "FareHarbor", type: "iframe" },
+    { selector: 'iframe[src*="bookingkit"]', category: "booking", name: "Bookingkit", type: "iframe" },
+    { selector: 'iframe[src*="rezdy"]', category: "booking", name: "Rezdy", type: "iframe" },
+    { selector: 'iframe[src*="checkfront"]', category: "booking", name: "Checkfront", type: "iframe" },
+    { selector: '[data-fareharbor]', category: "booking", name: "FareHarbor", type: "widget" },
+    { selector: 'iframe[src*="calendly"]', category: "appointment", name: "Calendly", type: "iframe" },
+    { selector: 'iframe[src*="acuityscheduling"]', category: "appointment", name: "Acuity", type: "iframe" },
+    { selector: '[class*="calendly"]', category: "appointment", name: "Calendly", type: "widget" },
+    { selector: 'iframe[src*="stripe"]', category: "checkout", name: "Stripe", type: "iframe" },
+    { selector: 'iframe[src*="paypal"]', category: "checkout", name: "PayPal", type: "iframe" },
+    { selector: '[data-stripe]', category: "checkout", name: "Stripe Elements", type: "widget" },
+    { selector: '#intercom-container', category: "chat", name: "Intercom", type: "widget" },
+    { selector: '[class*="intercom"]', category: "chat", name: "Intercom", type: "widget" },
+    { selector: '#drift-widget', category: "chat", name: "Drift", type: "widget" },
+    { selector: '[class*="zE-"]', category: "chat", name: "Zendesk", type: "widget" },
+    { selector: '#tidio-chat', category: "chat", name: "Tidio", type: "widget" },
+    { selector: '[class*="crisp"]', category: "chat", name: "Crisp", type: "widget" },
+    { selector: '#hubspot-messages-iframe-container', category: "chat", name: "HubSpot Chat", type: "widget" },
+    { selector: 'iframe[src*="livechat"]', category: "chat", name: "LiveChat", type: "iframe" },
+  ];
+  const seenWidgets = new Set();
+  widgetPatterns.forEach(wp => { doc.querySelectorAll(wp.selector).forEach(el => { if (seenWidgets.has(wp.name)) return; seenWidgets.add(wp.name); zones.push({ id: makeId(), type: "widget", category: wp.category, label: `${wp.name} ${wp.category} widget`, confidence: 0.95, elementDesc: `${wp.type === "iframe" ? "iframe" : "widget"} (${wp.name})`, elementSnippet: `<${el.tagName.toLowerCase()} ${wp.type === "iframe" ? `src="${(el.getAttribute("src") || "").slice(0,60)}"` : `class="${(el.className || "").toString().slice(0,50)}"`}>`, nearbyText: getNearbyText(el), element: el, widgetName: wp.name, widgetType: wp.type, source: "auto-detected" }); }); });
+
+  const scriptSrcs = Array.from(doc.querySelectorAll("script[src]")).map(s => s.getAttribute("src") || "");
+  const scriptWidgets = [{ pattern: /intercom/i, name: "Intercom", category: "chat" },{ pattern: /drift/i, name: "Drift", category: "chat" },{ pattern: /zendesk|zopim/i, name: "Zendesk", category: "chat" },{ pattern: /tidio/i, name: "Tidio", category: "chat" },{ pattern: /livechat/i, name: "LiveChat", category: "chat" },{ pattern: /crisp\.chat/i, name: "Crisp", category: "chat" },{ pattern: /calendly/i, name: "Calendly", category: "appointment" },{ pattern: /fareharbor/i, name: "FareHarbor", category: "booking" }];
+  scriptSrcs.forEach(src => { scriptWidgets.forEach(sw => { if (sw.pattern.test(src) && !seenWidgets.has(sw.name)) { seenWidgets.add(sw.name); zones.push({ id: makeId(), type: "widget", category: sw.category, label: `${sw.name} (detected via script)`, confidence: 0.85, elementDesc: `Script: ${src.slice(0, 60)}`, elementSnippet: `<script src="${src.slice(0,80)}">`, nearbyText: "", element: null, widgetName: sw.name, widgetType: "script", source: "auto-detected" }); } }); });
+
+  // 4. BLOCKERS
+  const blockerPatterns = [
+    { selector: '[class*="g-recaptcha"],[data-sitekey]', name: "reCAPTCHA", type: "captcha" },
+    { selector: '[class*="h-captcha"],[data-hcaptcha]', name: "hCaptcha", type: "captcha" },
+    { selector: '[class*="cf-turnstile"]', name: "Cloudflare Turnstile", type: "captcha" },
+    { selector: 'script[src*="akamai"]', name: "Akamai Bot Manager", type: "bot-detection" },
+    { selector: 'script[src*="datadome"]', name: "DataDome", type: "bot-detection" },
+    { selector: 'script[src*="perimeterx"],script[src*="human.com"]', name: "HUMAN (PerimeterX)", type: "bot-detection" },
+    { selector: '[class*="onetrust"],[id*="onetrust"]', name: "OneTrust", type: "consent" },
+    { selector: '[id*="CybotCookiebot"],[class*="cookiebot"]', name: "CookieBot", type: "consent" },
+    { selector: '[class*="didomi"],[id*="didomi"]', name: "Didomi", type: "consent" },
+    { selector: '[class*="trustarc"],[id*="trustarc"]', name: "TrustArc", type: "consent" },
+    { selector: '[id*="quantcast"],[class*="qc-cmp"]', name: "Quantcast", type: "consent" },
+    { selector: '[class*="cookie-banner"],[class*="cookie-notice"],[class*="cookie-consent"],[id*="cookie-banner"],[id*="cookie-notice"]', name: "Cookie banner", type: "consent" },
+  ];
+  const captchaScripts = [{ pattern: /recaptcha/i, name: "reCAPTCHA", type: "captcha" },{ pattern: /hcaptcha/i, name: "hCaptcha", type: "captcha" },{ pattern: /challenges\.cloudflare/i, name: "Cloudflare Turnstile", type: "captcha" },{ pattern: /datadome/i, name: "DataDome", type: "bot-detection" },{ pattern: /perimeterx|human\.com.*px/i, name: "HUMAN (PerimeterX)", type: "bot-detection" }];
+  const seenBlockers = new Set();
+  blockerPatterns.forEach(bp => { try { doc.querySelectorAll(bp.selector).forEach(el => { if (seenBlockers.has(bp.name)) return; seenBlockers.add(bp.name); zones.push({ id: makeId(), type: "blocker", category: bp.type, label: `${bp.name} (${bp.type === "captcha" ? "CAPTCHA" : bp.type === "bot-detection" ? "bot detection" : "cookie consent"})`, confidence: 0.95, elementDesc: bp.name, elementSnippet: `<${el.tagName.toLowerCase()} class="${(el.className || "").toString().slice(0,50)}">`, nearbyText: "", element: el, blockerName: bp.name, blockerType: bp.type, source: "auto-detected" }); }); } catch(e) {} });
+  scriptSrcs.forEach(src => { captchaScripts.forEach(cs => { if (cs.pattern.test(src) && !seenBlockers.has(cs.name)) { seenBlockers.add(cs.name); zones.push({ id: makeId(), type: "blocker", category: cs.type, label: `${cs.name} (detected via script)`, confidence: 0.9, elementDesc: `Script: ${src.slice(0, 60)}`, elementSnippet: `<script src="${src.slice(0,80)}">`, nearbyText: "", element: null, blockerName: cs.name, blockerType: cs.type, source: "auto-detected" }); } }); });
+
+  // 5. SCHEMA ACTIONS
+  doc.querySelectorAll('script[type="application/ld+json"]').forEach(script => { try { const data = JSON.parse(script.textContent); const items = Array.isArray(data) ? data : [data]; items.forEach(item => { const actions = []; if (item.potentialAction) { const pa = Array.isArray(item.potentialAction) ? item.potentialAction : [item.potentialAction]; actions.push(...pa); } if (item["@graph"]) { item["@graph"].forEach(g => { if (g.potentialAction) { const pa = Array.isArray(g.potentialAction) ? g.potentialAction : [g.potentialAction]; actions.push(...pa); } }); } actions.forEach(action => { const actionType = action["@type"] || "Unknown"; zones.push({ id: makeId(), type: "schema-action", category: "schema", label: `Schema: ${actionType}`, confidence: 0.9, elementDesc: `potentialAction: ${actionType}`, elementSnippet: JSON.stringify(action).slice(0, 120), nearbyText: action.target ? `Target: ${typeof action.target === "string" ? action.target : JSON.stringify(action.target).slice(0,80)}` : "", element: null, actionType, source: "auto-detected" }); }); }); } catch(e) {} });
+
+  zones.sort((a, b) => { if (a.type === "blocker" && b.type !== "blocker") return -1; if (b.type === "blocker" && a.type !== "blocker") return 1; return b.confidence - a.confidence; });
+  return zones;
+}
+
+function matchUserActions(userActionTexts, existingZones, doc) {
+  const newZones = [];
+  let idCounter = existingZones.length;
+  userActionTexts.forEach(actionText => {
+    const text = actionText.trim().toLowerCase();
+    if (!text) return;
+    const existingMatch = existingZones.find(z => { const zLabel = z.label.toLowerCase(); const actionWords = text.split(/\s+/).filter(w => w.length > 3); return actionWords.some(w => zLabel.includes(w) || z.category.toLowerCase().includes(w)); });
+    if (existingMatch) { existingMatch.userConfirmed = true; existingMatch.userAction = actionText; return; }
+    const keywords = text.split(/\s+/).filter(w => w.length > 2);
+    let bestMatch = null, bestScore = 0;
+    doc.querySelectorAll("button, a, form, input[type=submit]").forEach(el => { const elText = (el.textContent || "").toLowerCase() + " " + (el.getAttribute("aria-label") || "").toLowerCase(); let score = 0; keywords.forEach(kw => { if (elText.includes(kw)) score++; }); if (score > bestScore) { bestScore = score; bestMatch = el; } });
+    if (bestMatch && bestScore >= 1) { const tag = bestMatch.tagName.toLowerCase(); newZones.push({ id: `action-${++idCounter}`, type: tag === "form" ? "form" : "cta", category: "user-defined", label: actionText, confidence: 0.6 + (bestScore * 0.1), elementDesc: `<${tag}> matched by text similarity`, elementSnippet: `<${tag}${bestMatch.className ? ` class="${bestMatch.className.toString().slice(0,50)}"` : ""}>${(bestMatch.textContent || "").trim().slice(0,40)}`, nearbyText: getNearbyText(bestMatch), element: bestMatch, userDefined: true, userAction: actionText, source: "user-defined" }); }
+    else { newZones.push({ id: `action-${++idCounter}`, type: "unmatched", category: "user-defined", label: actionText, confidence: 0, elementDesc: "No matching element found in HTML", elementSnippet: "", nearbyText: "", element: null, userDefined: true, userAction: actionText, source: "user-defined" }); }
+  });
+  return newZones;
+}
+
+function auditActionZone(zone, doc) {
+  const issues = [];
+  const el = zone.element;
+  if (zone.type === "blocker") {
+    if (zone.blockerType === "captcha") issues.push({ severity: "high", check: "captcha-present", title: `${zone.blockerName} will block AI agents`, detail: "CAPTCHAs prevent automated interaction. No current AI agent can solve these reliably.", impact: "Any form or action protected by this CAPTCHA will be inaccessible to AI agents." });
+    else if (zone.blockerType === "bot-detection") issues.push({ severity: "high", check: "bot-detection-present", title: `${zone.blockerName} may block or challenge AI agents`, detail: "Bot detection services fingerprint automated browsers and can block or serve challenges to AI agents.", impact: "AI agents may be blocked entirely, or served degraded/different page content." });
+    else if (zone.blockerType === "consent") issues.push({ severity: "medium", check: "consent-overlay", title: `${zone.blockerName} consent overlay may block interaction`, detail: "Cookie consent overlays sit on top of page content. AI agents need to dismiss these before interacting with anything else.", impact: "Agents that can't dismiss the consent dialog won't be able to interact with page elements behind it." });
+    return { zone, issues, score: zone.blockerType === "consent" ? "warning" : "blocker" };
+  }
+  if (zone.type === "unmatched") { issues.push({ severity: "high", check: "no-matching-element", title: `No HTML element found for: "${zone.label}"`, detail: "No form, button, or link in the page source matches this action.", impact: "This action may only be available via JavaScript, behind a login, or may not exist on this page." }); return { zone, issues, score: "poor" }; }
+  if (zone.type === "schema-action") { if (!zone.nearbyText || !zone.nearbyText.includes("Target:")) issues.push({ severity: "medium", check: "schema-no-target", title: `${zone.actionType} has no target URL`, detail: "This schema action doesn't specify a target URL pattern.", impact: "Agents can see the action exists but can't programmatically use it." }); return { zone, issues, score: issues.length === 0 ? "good" : "partial" }; }
+  if (zone.type === "widget") {
+    if (zone.widgetType === "iframe") issues.push({ severity: "high", check: "iframe-widget", title: `${zone.widgetName} runs in an iframe \u2014 agents can't cross this boundary`, detail: "This widget loads in a separate iframe. AI agents on the parent page cannot interact with iframe content.", impact: `The entire ${zone.category} flow (${zone.widgetName}) is inaccessible to AI agents.` });
+    if (zone.widgetType === "script") issues.push({ severity: "medium", check: "js-widget", title: `${zone.widgetName} loads entirely via JavaScript`, detail: "This widget is injected by an external script and doesn't exist in raw HTML.", impact: "Agents parsing HTML source won't find this. Browser-based agents (Claude in Chrome, ChatGPT Operator) may interact after it loads." });
+    if (zone.category === "chat") issues.push({ severity: "low", check: "chat-widget", title: "Chat widgets are generally not agent-targetable", detail: `${zone.widgetName} is a live chat widget. AI agents typically can't initiate conversations through embedded widgets.`, impact: "Low impact unless live chat is required to complete a booking or enquiry." });
+    return { zone, issues, score: issues.some(i => i.severity === "high") ? "poor" : "partial" };
+  }
+  if (!el) { issues.push({ severity: "medium", check: "no-element-ref", title: "Element reference lost", detail: "The HTML element for this action zone couldn't be inspected.", impact: "Partial analysis only." }); return { zone, issues, score: "partial" }; }
+
+  if (zone.type === "form") {
+    const inputs = Array.from(el.querySelectorAll("input:not([type=hidden]),select,textarea"));
+    const buttons = Array.from(el.querySelectorAll("button,input[type=submit],input[type=button]"));
+    const unlabelled = inputs.filter(input => { const id = input.getAttribute("id"); return !( (id && el.querySelector(`label[for="${id}"]`)) || input.closest("label") || input.getAttribute("aria-label") || input.getAttribute("aria-labelledby") || input.getAttribute("placeholder") || input.getAttribute("title") ); });
+    if (unlabelled.length > 0) issues.push({ severity: "high", check: "unlabelled-inputs", title: `${unlabelled.length} form field(s) have no label, aria-label, or placeholder`, detail: unlabelled.map(i => `<${i.tagName.toLowerCase()} type="${i.getAttribute("type") || "text"}" name="${i.getAttribute("name") || "?"}">`).slice(0,5).join("\n"), impact: "AI agents can't determine what to enter in these fields." });
+    const placeholderOnly = inputs.filter(input => { const id = input.getAttribute("id"); return !((id && el.querySelector(`label[for="${id}"]`)) || input.closest("label") || input.getAttribute("aria-label")) && input.getAttribute("placeholder"); });
+    if (placeholderOnly.length > 0) issues.push({ severity: "low", check: "placeholder-only-labels", title: `${placeholderOnly.length} field(s) rely on placeholder as the only label`, detail: placeholderOnly.map(i => `<input placeholder="${i.getAttribute("placeholder")}">`).slice(0,3).join("\n"), impact: "Most agents can read placeholders, but proper <label> elements are more reliable." });
+    if (buttons.length === 0) issues.push({ severity: "high", check: "no-submit-button", title: "Form has no visible submit button", detail: "No <button> or <input type='submit'> found.", impact: "AI agents look for a submit button to complete forms. Without one, the agent can't submit." });
+    buttons.forEach(btn => { const btnText = (btn.textContent || "").trim(); if (!btnText && !btn.getAttribute("value") && !btn.getAttribute("aria-label")) issues.push({ severity: "medium", check: "empty-submit-button", title: "Submit button has no text or aria-label", detail: `<${btn.tagName.toLowerCase()} type="${btn.getAttribute("type") || "?"}">`, impact: "Agents can't determine what this button does." }); });
+    if (el.querySelectorAll('[class*="select"][role]:not(select),[class*="dropdown"][role]:not(select),[class*="combobox"]:not(select)').length > 0) issues.push({ severity: "medium", check: "custom-select", title: "Custom dropdown(s) instead of native <select>", detail: "Custom JS dropdowns require specific ARIA roles to be agent-accessible.", impact: "Browser-based agents may struggle. Native <select> is universally understood." });
+    if (el.querySelectorAll('[class*="datepicker"],[class*="date-picker"],[data-datepicker],[class*="flatpickr"],[class*="pikaday"]').length > 0) issues.push({ severity: "medium", check: "custom-datepicker", title: "Custom date picker widget detected", detail: "JS-based date pickers are harder for agents than native <input type='date'>.", impact: "Browser-based agents may struggle to select dates." });
+    if (el.querySelectorAll("input[type=file]").length > 0) issues.push({ severity: "medium", check: "file-upload-required", title: "Form requires file upload", detail: "File upload fields require agents to have local file access.", impact: "Most AI agents can't upload files." });
+    if (el.querySelector('[class*="g-recaptcha"],[class*="h-captcha"],[class*="cf-turnstile"],[data-sitekey]')) issues.push({ severity: "high", check: "form-captcha", title: "This form is protected by a CAPTCHA", detail: "A CAPTCHA challenge is embedded directly in this form.", impact: "AI agents cannot solve CAPTCHAs. This form is inaccessible to all current agents." });
+  } else if (zone.type === "cta") {
+    if (zone.isLink) { const href = el.getAttribute("href") || ""; if (href === "#" || href.startsWith("javascript:")) issues.push({ severity: "high", check: "fake-link", title: "CTA uses a fake link (href='#' or javascript:)", detail: `<a href="${href}">${(el.textContent || "").trim().slice(0,40)}</a>`, impact: "This link relies on a JS click handler. LLM crawlers can't follow it." }); }
+    const tag = el.tagName.toLowerCase();
+    if (!zone.isLink && tag !== "button" && tag !== "input" && el.getAttribute("role") !== "button" && el.getAttribute("role") !== "link") issues.push({ severity: "high", check: "non-semantic-cta", title: `CTA is a <${tag}> without role="button"`, detail: `<${tag} class="${(el.className || "").toString().slice(0,40)}">${(el.textContent || "").trim().slice(0,40)}</${tag}>`, impact: "AI agents can't identify this as interactive. Use <button>, <a>, or add role='button'." });
+    const ctaText = (el.textContent || "").trim().toLowerCase();
+    if (/^(click here|learn more|more|here|go|submit|ok|yes)$/i.test(ctaText)) issues.push({ severity: "medium", check: "vague-cta-text", title: `CTA text is vague: "${ctaText}"`, detail: "Generic text doesn't tell an agent what action this performs.", impact: "Agents need descriptive text to decide whether to click." });
+    if (zone.isLink && el.getAttribute("onclick") && (!el.getAttribute("href") || el.getAttribute("href") === "#")) issues.push({ severity: "high", check: "onclick-cta", title: "CTA relies on onclick handler instead of a real URL", detail: `onclick="${(el.getAttribute("onclick") || "").slice(0,60)}"`, impact: "The action is in JavaScript, not a navigable href." });
+  }
+
+  // Cross-cutting checks
+  if (el) {
+    const modal = el.closest('[class*="modal"],[class*="dialog"],[role="dialog"],[class*="popup"],[class*="overlay"]');
+    if (modal && ((modal.getAttribute("style") || "").includes("display: none") || (modal.getAttribute("style") || "").includes("visibility: hidden") || modal.getAttribute("aria-hidden") === "true")) issues.push({ severity: "high", check: "hidden-modal", title: "This action is inside a hidden modal/dialog", detail: "The form/CTA is inside a modal that's not visible by default.", impact: "The agent needs to find and click a trigger to open this modal first." });
+    if (el.getAttribute("aria-hidden") === "true" || el.closest('[aria-hidden="true"]')) issues.push({ severity: "high", check: "aria-hidden-action", title: "This action element has aria-hidden='true'", detail: "The element or a parent is hidden from assistive technology.", impact: "AI agents using the accessibility tree will not see this element." });
+  }
+
+  const highCount = issues.filter(i => i.severity === "high").length;
+  const medCount = issues.filter(i => i.severity === "medium").length;
+  return { zone, issues, score: highCount > 0 ? "poor" : medCount > 0 ? "partial" : "good" };
+}
+
+function runAgentReadinessAudit(confirmedZones, doc) { return confirmedZones.map(zone => auditActionZone(zone, doc)); }
+
+function checkGlobalAgentSignals(doc, html) {
+  const signals = [];
+  const hasSchemaActions = /potentialAction/i.test(html);
+  signals.push({ check: "schema-actions", present: hasSchemaActions, label: "Schema.org potentialAction markup", detail: hasSchemaActions ? "Page declares structured actions \u2014 agents can discover interactions via schema" : "No potentialAction in schema \u2014 agents must infer actions from the UI" });
+  const hasMain = doc.querySelector("main") || doc.querySelector('[role="main"]');
+  signals.push({ check: "main-landmark", present: !!hasMain, label: "<main> landmark element", detail: hasMain ? "Page has a main content area \u2014 helps agents focus on primary content" : "No <main> element \u2014 agents may struggle to distinguish primary content from nav/footer" });
+  const hasNav = doc.querySelector("nav") || doc.querySelector('[role="navigation"]');
+  signals.push({ check: "nav-landmark", present: !!hasNav, label: "Navigation landmark (<nav>)", detail: hasNav ? "Navigation is properly landmarked" : "No <nav> elements found" });
+  const h1s = doc.querySelectorAll("h1");
+  signals.push({ check: "h1-present", present: h1s.length === 1, label: "Single H1 heading", detail: h1s.length === 0 ? "No H1 \u2014 agents can't identify the page's primary topic" : h1s.length === 1 ? "Single H1 present \u2014 clear page topic" : `${h1s.length} H1s \u2014 may confuse agents about the page's purpose` });
+  const hasLlmsTxt = /llms\.txt|llms-full\.txt/i.test(html);
+  signals.push({ check: "llms-txt", present: hasLlmsTxt, label: "llms.txt reference", detail: hasLlmsTxt ? "Page references llms.txt \u2014 provides structured instructions for LLMs" : "No llms.txt reference (optional, emerging standard)" });
+  return signals;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   FULL ANALYSIS PIPELINE
+   ═══════════════════════════════════════════════════════════════════ */
+function analyze(sourceHtml, renderedHtml) {
+  const sourceDoc = parseDoc(sourceHtml);
+  const sourceData = {
+    meta: extractMeta(sourceDoc), schema: extractSchema(sourceDoc),
+    headings: extractHeadings(sourceDoc), links: extractLinks(sourceDoc),
+    images: extractImages(sourceDoc), text: extractText(sourceDoc),
+    dataAttrs: extractDataAttrs(sourceDoc),
+  };
+  const issues = auditSource(sourceDoc, sourceHtml);
+  let renderedData = null, diff = null;
+  if (renderedHtml?.trim().length > 100) {
+    const renderedDoc = parseDoc(renderedHtml);
+    renderedData = {
+      meta: extractMeta(renderedDoc), schema: extractSchema(renderedDoc),
+      headings: extractHeadings(renderedDoc), links: extractLinks(renderedDoc),
+      images: extractImages(renderedDoc), text: extractText(renderedDoc),
+      dataAttrs: extractDataAttrs(renderedDoc),
+    };
+    diff = computeDiff(sourceData, renderedData);
+    issues.push(...promoteDiffToIssues(diff));
+  }
+  return { sourceData, renderedData, issues, diff };
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   UI COMPONENTS
+   ═══════════════════════════════════════════════════════════════════ */
+function Section({ title, count, children, defaultOpen = false, tagText, tagColor }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ marginBottom: 14 }} className="fade-in">
+      <button onClick={() => setOpen(!open)} style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
+        padding: "12px 18px", background: "var(--surface2)", border: "1px solid var(--border)",
+        borderRadius: open ? "10px 10px 0 0" : 10, color: "var(--text)", fontFamily: "var(--font-body)",
+        fontSize: 13, fontWeight: 600, cursor: "pointer", borderBottom: open ? "none" : undefined,
+      }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ color: "var(--dim)", fontSize: 9, transition: "transform 0.2s", transform: open ? "rotate(90deg)" : "none", display: "inline-block" }}>{"\u25B6"}</span>
+          {title}
+          {tagText && <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 10px", borderRadius: 20, background: (tagColor || "var(--accent)") + "20", color: tagColor || "var(--accent)", letterSpacing: "0.03em" }}>{tagText}</span>}
+        </span>
+        <span style={{ fontSize: 11, color: "var(--dim)", fontWeight: 400 }}>{count !== undefined ? `${count} items` : ""}</span>
+      </button>
+      {open && <div style={{ border: "1px solid var(--border)", borderTop: "none", borderRadius: "0 0 10px 10px", overflow: "hidden" }} className="slide-in">{children}</div>}
+    </div>
+  );
+}
+
+function Row({ children, cols = "1fr", highlight }) {
+  return <div style={{ display: "grid", gridTemplateColumns: cols, gap: 10, padding: "9px 18px", borderBottom: "1px solid var(--border)", fontSize: 13, alignItems: "start", background: highlight || "transparent" }}>{children}</div>;
+}
+
+function Badge({ children, color = "var(--accent)" }) {
+  return <span style={{ display: "inline-block", padding: "2px 10px", borderRadius: 20, fontSize: 10, fontWeight: 700, background: color + "20", color, letterSpacing: "0.03em", whiteSpace: "nowrap", fontFamily: "var(--font-mono)" }}>{children}</span>;
+}
+
+function Empty({ children }) {
+  return <div style={{ padding: "36px 20px", textAlign: "center", color: "var(--dim)", fontSize: 13 }}>{children}</div>;
+}
+
+const sevColor = (s) => s === "high" ? "var(--red)" : s === "medium" ? "var(--orange)" : s === "info" ? "var(--accent)" : "var(--muted)";
+
+/* ═══════════════════════════════════════════════════════════════════
+   HELP GUIDE
+   ═══════════════════════════════════════════════════════════════════ */
+function HelpGuide({ onClose }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, backdropFilter: "blur(4px)" }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, maxWidth: 680, width: "100%", maxHeight: "80vh", overflow: "auto", padding: "32px 36px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+          <h2 style={{ fontSize: 20, fontWeight: 700 }}>How to Use This Tool</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 22, cursor: "pointer", padding: 4 }}>{"\u00D7"}</button>
+        </div>
+        <div style={{ fontSize: 14, color: "var(--muted)", lineHeight: 1.8 }}>
+          <h3 style={{ color: "var(--accent)", fontSize: 16, fontWeight: 700, marginBottom: 8, marginTop: 0 }}>Page Analysis</h3>
+          <p style={{ marginBottom: 12 }}>Paste in a page's source HTML to see what LLMs can extract from it. Optionally add the rendered DOM (from DevTools) to compare what's in the raw HTML vs what only loads after JavaScript runs.</p>
+          <p style={{ marginBottom: 6 }}><strong style={{ color: "var(--text)" }}>Source HTML:</strong> Right-click page {"\u2192"} View Page Source (Ctrl+U / Cmd+U). Select all, copy, paste.</p>
+          <p style={{ marginBottom: 16 }}><strong style={{ color: "var(--text)" }}>Rendered DOM:</strong> DevTools (F12) {"\u2192"} Elements tab {"\u2192"} right-click <code style={{ background: "var(--surface2)", padding: "1px 6px", borderRadius: 3, color: "var(--purple)", fontSize: 12, fontFamily: "var(--font-mono)" }}>&lt;html&gt;</code> {"\u2192"} Copy outerHTML.</p>
+
+          <h3 style={{ color: "var(--cyan)", fontSize: 16, fontWeight: 700, marginBottom: 8 }}>Crawl Test</h3>
+          <p style={{ marginBottom: 12 }}>Enter a URL to test whether different LLM crawlers can actually access the page. This sends real HTTP requests using each crawler's user-agent string and shows you the response status for each one.</p>
+          <p style={{ marginBottom: 8 }}>This feature requires a small proxy service (Cloudflare Worker) because browsers can't send requests with custom user agents. If you haven't set this up yet, the tool will show you how.</p>
+
+          <h3 style={{ color: "#34D399", fontSize: 16, fontWeight: 700, marginBottom: 8, marginTop: 16 }}>Agent Readiness</h3>
+          <p style={{ marginBottom: 12 }}>Checks whether AI agents (like ChatGPT Operator, Claude in Chrome) could complete actions on the page {"\u2014"} booking, purchasing, filling forms, etc. Paste source HTML in Page Analysis first, then switch to Agent Readiness.</p>
+          <p style={{ marginBottom: 12 }}>The tool auto-detects forms, CTAs, booking widgets, and blockers (CAPTCHAs, bot detection). You tick which actions matter, optionally add custom ones, and it audits each for agent readiness {"\u2014"} checking labels, semantic HTML, accessibility, and more.</p>
+
+          <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "14px 16px", marginTop: 16, borderLeft: "3px solid var(--accent)" }}>
+            <strong style={{ color: "var(--accent)" }}>Tip:</strong> Use all three together: Crawl Test checks access, Page Analysis checks content visibility, Agent Readiness checks whether agents can take actions.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   COPY REPORT
+   ═══════════════════════════════════════════════════════════════════ */
+function generateReport(r, crawlResults) {
+  const lines = [];
+  lines.push("LLM VISIBILITY REPORT");
+  lines.push("=".repeat(50));
+  lines.push("");
+
+  if (r) {
+    const hc = r.issues.filter(i => i.severity === "high").length;
+    const mc = r.issues.filter(i => i.severity === "medium").length;
+    const lc = r.issues.filter(i => i.severity === "low").length;
+    lines.push("PAGE ANALYSIS SUMMARY");
+    lines.push(`  High issues: ${hc}`);
+    lines.push(`  Medium issues: ${mc}`);
+    lines.push(`  Low issues: ${lc}`);
+    lines.push(`  Crawlable links: ${r.sourceData.links.length}`);
+    lines.push(`  Schema blocks: ${r.sourceData.schema.length}`);
+    lines.push(`  Headings: ${r.sourceData.headings.length}`);
+    lines.push("");
+    if (r.issues.length > 0) {
+      lines.push("ISSUES");
+      lines.push("-".repeat(50));
+      for (const issue of r.issues) {
+        lines.push(`[${issue.severity.toUpperCase()}] ${issue.title}${issue.count > 1 ? ` (\u00D7${issue.count})` : ""}`);
+        lines.push(`  ${issue.detail.split("\n")[0]}`);
+        lines.push(`  Why: ${issue.why}`);
+        lines.push("");
+      }
+    }
+  }
+
+  if (crawlResults) {
+    lines.push("");
+    lines.push("CRAWL TEST RESULTS");
+    lines.push("=".repeat(50));
+    lines.push(`URL: ${crawlResults.url}`);
+    lines.push(`Tested: ${crawlResults.testedAt}`);
+    lines.push("");
+    const baseline = crawlResults.results.find(r => r.isBaseline);
+    if (baseline) lines.push(`Baseline (Chrome): ${baseline.status} ${baseline.statusText}`);
+    lines.push("");
+    for (const cr of crawlResults.results.filter(cr => !cr.isBaseline)) {
+      const icon = cr.blocked ? "BLOCKED" : cr.status === 200 ? "OK" : cr.status === 0 ? "ERROR" : `${cr.status}`;
+      lines.push(`[${icon}] ${cr.name} (${cr.org}) \u2014 HTTP ${cr.status} ${cr.statusText || ""} \u2014 ${cr.responseTimeMs}ms`);
+      if (cr.redirectedTo) lines.push(`  Redirected to: ${cr.redirectedTo}`);
+      if (cr.robotsTxt === "disallowed") lines.push(`  Robots.txt: BLOCKED (matched: ${cr.robotsTxtMatchedAgent})`);
+      if (cr.robotsTxt === "allowed" && cr.robotsTxtMatchedAgent && cr.robotsTxtMatchedAgent !== "none") lines.push(`  Robots.txt: Allowed (matched: ${cr.robotsTxtMatchedAgent})`);
+      if (cr.robotsMeta) lines.push(`  Meta robots: ${cr.robotsMeta}`);
+      if (cr.specificRobotsMeta) lines.push(`  Bot-specific meta: ${cr.specificRobotsMeta}`);
+      if (cr.error) lines.push(`  Error: ${cr.error}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   CRAWL TEST COMPONENT
+   ═══════════════════════════════════════════════════════════════════ */
+const WORKER_URL_KEY = "llm-analyzer-worker-url";
+const DEFAULT_WORKER_URL = "https://llm-crawl-tester.google-cb4.workers.dev";
+
+function CrawlTest({ onResults }) {
+  const [workerUrl, setWorkerUrl] = useState(() => {
+    try { return localStorage.getItem(WORKER_URL_KEY) || DEFAULT_WORKER_URL; } catch { return DEFAULT_WORKER_URL; }
+  });
+  const [testUrl, setTestUrl] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [results, setResults] = useState(null);
+  const [error, setError] = useState("");
+  const [showSetup, setShowSetup] = useState(false);
+  const [copyMsg, setCopyMsg] = useState("");
+  const [ccIndex, setCcIndex] = useState(null);
+  const [ccLoading, setCcLoading] = useState(false);
+
+  const saveWorkerUrl = useCallback((url) => {
+    setWorkerUrl(url);
+    try { localStorage.setItem(WORKER_URL_KEY, url); } catch {}
+  }, []);
+
+  // Fetch CC Index coverage for a domain
+  const fetchCcIndex = useCallback(async (domain, worker) => {
+    setCcLoading(true);
+    setCcIndex(null);
+    try {
+      const resp = await fetch(worker.replace(/\/$/, "") + "/cc-index", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain }),
+      });
+      const data = await resp.json();
+      setCcIndex(data);
+    } catch (err) {
+      setCcIndex({ error: err.message || "Failed to fetch CC Index", inIndex: null });
+    }
+    setCcLoading(false);
+  }, []);
+
+  const runTest = useCallback(async () => {
+    if (!testUrl.trim() || !workerUrl.trim()) return;
+    setLoading(true);
+    setError("");
+    setResults(null);
+    setCcIndex(null);
+
+    let url = testUrl.trim();
+    if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
+
+    // Also kick off CC Index check in parallel
+    try {
+      const parsedDomain = new URL(url).hostname;
+      fetchCcIndex(parsedDomain, workerUrl);
+    } catch {}
+
+    try {
+      const resp = await fetch(workerUrl.replace(/\/$/, "") + "/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.error || `Worker returned HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      setResults(data);
+      if (onResults) onResults(data);
+    } catch (err) {
+      if (err.message.includes("Failed to fetch") || err.message.includes("NetworkError")) {
+        setError("Can't reach the worker. Check the URL is correct and the worker is deployed.");
+      } else {
+        setError(err.message);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [testUrl, workerUrl, onResults]);
+
+  const copyCrawlReport = useCallback(() => {
+    if (!results) return;
+    const text = generateReport(null, results);
+    navigator.clipboard.writeText(text).then(() => {
+      setCopyMsg("Copied!");
+      setTimeout(() => setCopyMsg(""), 2000);
+    });
+  }, [results]);
+
+  const statusColor = (r) => {
+    if (r.blocked) return "var(--red)";
+    if (r.status === 200) return "var(--green)";
+    if (r.status >= 300 && r.status < 400) return "var(--orange)";
+    if (r.status === 0) return "var(--dim)";
+    return "var(--red)";
+  };
+
+  const statusIcon = (r) => {
+    if (r.blocked) return "\u2717";
+    if (r.status === 200) return "\u2713";
+    if (r.status >= 300 && r.status < 400) return "\u21B7";
+    if (r.status === 0) return "?";
+    return "\u2717";
+  };
+
+  const hasWorker = workerUrl.trim().length > 0;
+
+  return (
+    <div>
+      {/* Worker URL setup — shown when no URL saved */}
+      {!hasWorker && !showSetup && (
+        <div className="fade-in" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "28px 32px", marginBottom: 24, borderLeft: "3px solid var(--cyan)" }}>
+          <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 8, color: "var(--cyan)" }}>Setup Required</h3>
+          <p style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.7, marginBottom: 16 }}>
+            The crawl test needs a small proxy service to send requests with different user agents. This is a free Cloudflare Worker that takes about 5 minutes to set up.
+          </p>
+          <button onClick={() => setShowSetup(true)} style={{
+            background: "var(--cyan)", color: "var(--bg)", border: "none", borderRadius: 8,
+            padding: "10px 24px", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-body)", cursor: "pointer",
+          }}>Show Setup Guide</button>
+        </div>
+      )}
+
+      {/* Setup guide */}
+      {showSetup && (
+        <div className="fade-in" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "28px 32px", marginBottom: 24 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <h3 style={{ fontSize: 16, fontWeight: 700, color: "var(--cyan)" }}>Cloudflare Worker Setup</h3>
+            {hasWorker && <button onClick={() => setShowSetup(false)} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 18, cursor: "pointer" }}>{"\u00D7"}</button>}
+          </div>
+          <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.9 }}>
+            <p style={{ marginBottom: 12 }}><strong style={{ color: "var(--text)" }}>1.</strong> Go to <a href="https://dash.cloudflare.com" target="_blank" rel="noopener" style={{ color: "var(--cyan)" }}>dash.cloudflare.com</a> and create a free account (or log in)</p>
+            <p style={{ marginBottom: 12 }}><strong style={{ color: "var(--text)" }}>2.</strong> Click <strong style={{ color: "var(--text)" }}>Workers & Pages</strong> in the left sidebar, then <strong style={{ color: "var(--text)" }}>Create</strong></p>
+            <p style={{ marginBottom: 12 }}><strong style={{ color: "var(--text)" }}>3.</strong> Choose <strong style={{ color: "var(--text)" }}>Create Worker</strong>, name it <code style={{ background: "var(--surface2)", padding: "2px 8px", borderRadius: 4, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--cyan)" }}>llm-crawl-tester</code>, click <strong style={{ color: "var(--text)" }}>Deploy</strong></p>
+            <p style={{ marginBottom: 12 }}><strong style={{ color: "var(--text)" }}>4.</strong> Click <strong style={{ color: "var(--text)" }}>Edit Code</strong>, delete everything in the editor, and paste the worker code from the <code style={{ background: "var(--surface2)", padding: "2px 8px", borderRadius: 4, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--cyan)" }}>worker.js</code> file</p>
+            <p style={{ marginBottom: 12 }}><strong style={{ color: "var(--text)" }}>5.</strong> Click <strong style={{ color: "var(--text)" }}>Deploy</strong> again</p>
+            <p style={{ marginBottom: 16 }}><strong style={{ color: "var(--text)" }}>6.</strong> Copy the worker URL (looks like <code style={{ background: "var(--surface2)", padding: "2px 8px", borderRadius: 4, fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--cyan)" }}>https://llm-crawl-tester.yourname.workers.dev</code>) and paste it below:</p>
+          </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <input
+              type="url" value={workerUrl} onChange={e => saveWorkerUrl(e.target.value)}
+              placeholder="https://llm-crawl-tester.yourname.workers.dev"
+              style={{
+                flex: 1, padding: "10px 14px", background: "var(--surface2)", border: "1px solid var(--border)",
+                borderRadius: 8, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, outline: "none",
+              }}
+              onFocus={e => e.target.style.borderColor = "var(--cyan)"}
+              onBlur={e => e.target.style.borderColor = "var(--border)"}
+            />
+            {hasWorker && <button onClick={() => setShowSetup(false)} style={{
+              background: "var(--cyan)", color: "var(--bg)", border: "none", borderRadius: 8,
+              padding: "10px 20px", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-body)", cursor: "pointer",
+            }}>Done</button>}
+          </div>
+        </div>
+      )}
+
+      {/* URL input + test button */}
+      {hasWorker && !showSetup && (
+        <div className="fade-in">
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 8 }}>
+            <input
+              type="url" value={testUrl} onChange={e => setTestUrl(e.target.value)}
+              placeholder="Enter a URL to test (e.g. https://example.com/page)"
+              onKeyDown={e => e.key === "Enter" && runTest()}
+              style={{
+                flex: 1, padding: "12px 16px", background: "var(--surface)", border: "1px solid var(--border)",
+                borderRadius: 10, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 13, outline: "none",
+              }}
+              onFocus={e => e.target.style.borderColor = "var(--cyan)"}
+              onBlur={e => e.target.style.borderColor = "var(--border)"}
+            />
+            <button onClick={runTest} disabled={loading || !testUrl.trim()} style={{
+              background: (!loading && testUrl.trim()) ? "var(--cyan)" : "var(--dim)",
+              color: "var(--bg)", border: "none", borderRadius: 10, padding: "12px 28px",
+              fontSize: 14, fontWeight: 700, fontFamily: "var(--font-body)",
+              cursor: (!loading && testUrl.trim()) ? "pointer" : "default", whiteSpace: "nowrap",
+            }}>{loading ? "Testing\u2026" : "Test Crawlers"}</button>
+          </div>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 20 }}>
+            <button onClick={() => setShowSetup(true)} style={{
+              background: "none", border: "none", color: "var(--dim)", fontSize: 11, cursor: "pointer",
+              fontFamily: "var(--font-body)", padding: "2px 0",
+            }}>Change worker URL</button>
+            {results && (
+              <button onClick={copyCrawlReport} style={{
+                background: "none", border: "1px solid var(--border)", borderRadius: 8,
+                color: copyMsg ? "var(--green)" : "var(--muted)", fontSize: 12, cursor: "pointer",
+                fontFamily: "var(--font-body)", padding: "4px 14px", fontWeight: 600,
+              }}>{copyMsg || "Copy Results"}</button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Loading */}
+      {loading && (
+        <div className="fade-in" style={{ padding: "40px 20px", textAlign: "center" }}>
+          <div style={{ display: "inline-block", width: 28, height: 28, border: "3px solid var(--border)", borderTopColor: "var(--cyan)", borderRadius: "50%", animation: "spin 0.8s linear infinite", marginBottom: 12 }} />
+          <p style={{ color: "var(--muted)", fontSize: 13 }}>Testing with 16 crawlers {"\u00D7"} 3 passes (with delays between each){"\u2026"}</p>
+          <p style={{ color: "var(--dim)", fontSize: 11, marginTop: 6 }}>This takes about 10 seconds to check for intermittent blocking</p>
+        </div>
+      )}
+
+      {/* Error */}
+      {error && (
+        <div className="fade-in" style={{ background: "var(--red-bg)", border: "1px solid var(--red)", borderRadius: 10, padding: "14px 18px", marginBottom: 20 }}>
+          <strong style={{ color: "var(--red)" }}>Error:</strong>
+          <span style={{ color: "var(--muted)", marginLeft: 8, fontSize: 13 }}>{error}</span>
+        </div>
+      )}
+
+      {/* Results */}
+      {results && !loading && (
+        <div className="fade-in">
+          {(() => {
+            const baseline = results.results.find(r => r.isBaseline);
+            const bots = results.results.filter(r => !r.isBaseline);
+            const blocked = bots.filter(r => r.blocked);
+            const ok = bots.filter(r => r.status === 200);
+            const redirected = bots.filter(r => r.status >= 300 && r.status < 400);
+            const errored = bots.filter(r => r.status === 0);
+            const other = bots.filter(r => !r.blocked && r.status !== 200 && !(r.status >= 300 && r.status < 400) && r.status !== 0);
+            const intermittent = bots.filter(r => r.passes && r.passes.length > 1 && !r.consistent);
+            const robotsBlocked = bots.filter(r => r.robotsTxt === "disallowed");
+
+            // Soft block detection: bot got 200 but significantly less content than baseline
+            const baselineBodySize = baseline?.bodySize || 0;
+            const softBlocked = baselineBodySize > 1000 ? bots.filter(r => 
+              r.status === 200 && !r.blocked && r.bodySize > 0 && r.bodySize < baselineBodySize * 0.3
+            ) : [];
+            // WAF-blocked: got 403/401/451 while baseline got 200 (distinct from robots.txt)
+            const wafBlocked = bots.filter(r => r.blocked && !(r.robotsTxt === "disallowed"));
+
+            return (
+              <>
+                {/* Summary cards */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 12, marginBottom: 24 }}>
+                  {[
+                    { n: ok.length - softBlocked.length, label: "Fully Allowed", color: (ok.length - softBlocked.length) > 0 ? "var(--green)" : "var(--dim)" },
+                    { n: wafBlocked.length, label: "WAF Blocked", color: wafBlocked.length > 0 ? "var(--red)" : "var(--green)" },
+                    { n: robotsBlocked.length, label: "Robots.txt Blocked", color: robotsBlocked.length > 0 ? "var(--red)" : "var(--green)" },
+                    { n: softBlocked.length, label: "Soft Blocked", color: softBlocked.length > 0 ? "var(--orange)" : "var(--dim)" },
+                    { n: intermittent.length, label: "Intermittent", color: intermittent.length > 0 ? "var(--orange)" : "var(--dim)" },
+                  ].map((card, i) => (
+                    <div key={i} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", borderLeft: `3px solid ${card.color}` }}>
+                      <div style={{ fontSize: 24, fontWeight: 700, color: card.color, fontFamily: "var(--font-mono)" }}>{card.n}</div>
+                      <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 3, fontWeight: 600 }}>{card.label}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Baseline */}
+                {baseline && (
+                  <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 18px", marginBottom: 16, display: "flex", alignItems: "center", gap: 14 }}>
+                    <span style={{ fontSize: 18, color: statusColor(baseline) }}>{statusIcon(baseline)}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13 }}>Baseline: Chrome Browser</div>
+                      <div style={{ fontSize: 12, color: "var(--dim)" }}>Standard browser request {"\u2014"} this is what we compare all bots against{baseline.bodySize > 0 ? ` (${(baseline.bodySize / 1024).toFixed(1)}KB response)` : ""}</div>
+                    </div>
+                    <Badge color={statusColor(baseline)}>HTTP {baseline.status}</Badge>
+                    <span style={{ fontSize: 11, color: "var(--dim)", fontFamily: "var(--font-mono)" }}>{baseline.responseTimeMs}ms</span>
+                  </div>
+                )}
+
+                {/* Bot results */}
+                <Section title="Crawler Results" count={bots.length} defaultOpen tagText={blocked.length > 0 ? `${blocked.length} blocked` : "all clear"} tagColor={blocked.length > 0 ? "var(--red)" : "var(--green)"}>
+                  {bots.map((cr, i) => {
+                    const hasPasses = cr.passes && cr.passes.length > 1;
+                    const inconsistent = hasPasses && !cr.consistent;
+                    const isSoftBlocked = baselineBodySize > 1000 && cr.status === 200 && !cr.blocked && cr.bodySize > 0 && cr.bodySize < baselineBodySize * 0.3;
+                    const bodySizeRatio = baselineBodySize > 0 && cr.bodySize > 0 ? (cr.bodySize / baselineBodySize * 100).toFixed(0) : null;
+                    return (
+                    <div key={i} style={{
+                      display: "grid", gridTemplateColumns: "32px 1fr auto auto",
+                      gap: 14, padding: "12px 18px", alignItems: "center",
+                      borderBottom: "1px solid var(--border)",
+                      background: isSoftBlocked ? "var(--orange-bg)" : inconsistent ? "var(--orange-bg)" : cr.blocked ? "var(--red-bg)" : "transparent",
+                    }}>
+                      <span style={{ fontSize: 18, color: isSoftBlocked ? "var(--orange)" : statusColor(cr), textAlign: "center" }}>{isSoftBlocked ? "\u26A0" : statusIcon(cr)}</span>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+                          {cr.name}
+                          <span style={{ fontSize: 11, color: "var(--dim)", fontWeight: 400 }}>{cr.org}</span>
+                          {inconsistent && <Badge color="var(--orange)">intermittent</Badge>}
+                          {isSoftBlocked && <Badge color="var(--orange)">soft block</Badge>}
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 2 }}>{cr.description}</div>
+                        {/* Per-pass status dots */}
+                        {hasPasses && (
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5 }}>
+                            <span style={{ fontSize: 10, color: "var(--dim)" }}>Passes:</span>
+                            {cr.passes.map((p, pi) => (
+                              <span key={pi} title={`Pass ${pi+1}: HTTP ${p.status} (${p.responseTimeMs}ms)`} style={{
+                                display: "inline-flex", alignItems: "center", gap: 3,
+                                fontSize: 10, fontFamily: "var(--font-mono)",
+                                color: p.blocked ? "var(--red)" : p.status === 200 ? "var(--green)" : p.status >= 300 && p.status < 400 ? "var(--orange)" : "var(--dim)",
+                              }}>
+                                <span style={{
+                                  width: 7, height: 7, borderRadius: "50%", display: "inline-block",
+                                  background: p.blocked ? "var(--red)" : p.status === 200 ? "var(--green)" : p.status >= 300 && p.status < 400 ? "var(--orange)" : "var(--dim)",
+                                }} />
+                                {p.status || "ERR"}
+                              </span>
+                            ))}
+                            {inconsistent && <span style={{ fontSize: 10, color: "var(--orange)", marginLeft: 4 }}>{"\u26A0"} inconsistent responses</span>}
+                          </div>
+                        )}
+                        {cr.redirectedTo && <div style={{ fontSize: 11, color: "var(--orange)", marginTop: 3, fontFamily: "var(--font-mono)" }}>{"\u21B7"} Redirected to: {trunc(cr.redirectedTo, 60)}</div>}
+                        {cr.robotsTxt === "disallowed" && (
+                          <div style={{ fontSize: 11, color: "var(--red)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{"\u2717"}</span> Blocked by robots.txt <span style={{ color: "var(--dim)" }}>(matched: {cr.robotsTxtMatchedAgent})</span>
+                          </div>
+                        )}
+                        {cr.robotsTxt === "allowed" && (
+                          <div style={{ fontSize: 11, color: "var(--green)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{"\u2713"}</span> Allowed by robots.txt {cr.robotsTxtMatchedAgent && cr.robotsTxtMatchedAgent !== "none" && cr.robotsTxtMatchedAgent !== "*" && <span style={{ color: "var(--dim)" }}>(matched: {cr.robotsTxtMatchedAgent})</span>}
+                          </div>
+                        )}
+                        {cr.robotsTxt === null && !cr.isBaseline && (
+                          <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            {"\u2014"} No robots.txt found
+                          </div>
+                        )}
+                        {cr.robotsMeta && /noindex|nofollow|none/i.test(cr.robotsMeta) && (
+                          <div style={{ fontSize: 11, color: "var(--orange)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{"\u26A0"}</span> Meta robots: {cr.robotsMeta}
+                          </div>
+                        )}
+                        {cr.robotsMeta && !/noindex|nofollow|none/i.test(cr.robotsMeta) && (
+                          <div style={{ fontSize: 11, color: "var(--green)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{"\u2713"}</span> Meta robots: {cr.robotsMeta}
+                          </div>
+                        )}
+                        {!cr.robotsMeta && !cr.isBaseline && cr.status === 200 && (
+                          <div style={{ fontSize: 11, color: "var(--green)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{"\u2713"}</span> No restrictive meta robots tags
+                          </div>
+                        )}
+                        {cr.specificRobotsMeta && (
+                          <div style={{ fontSize: 11, color: /noindex|nofollow|none/i.test(cr.specificRobotsMeta) ? "var(--red)" : "var(--purple)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{/noindex|nofollow|none/i.test(cr.specificRobotsMeta) ? "\u2717" : "\u2713"}</span> Bot-specific meta: {cr.specificRobotsMeta}
+                          </div>
+                        )}
+                        {cr.error && <div style={{ fontSize: 11, color: "var(--red)", marginTop: 3 }}>{cr.timeout ? "Request timed out (15s)" : cr.error}</div>}
+                        {isSoftBlocked && (
+                          <div style={{ fontSize: 11, color: "var(--orange)", marginTop: 3, display: "flex", alignItems: "center", gap: 4 }}>
+                            <span>{"\u26A0"}</span> Response body {(cr.bodySize / 1024).toFixed(1)}KB vs baseline {(baselineBodySize / 1024).toFixed(1)}KB ({bodySizeRatio}%) {"\u2014"} likely a challenge page or stripped content
+                          </div>
+                        )}
+                        {!isSoftBlocked && cr.status === 200 && bodySizeRatio && !cr.isBaseline && (
+                          <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 3 }}>
+                            Response: {(cr.bodySize / 1024).toFixed(1)}KB ({bodySizeRatio}% of baseline)
+                          </div>
+                        )}
+                      </div>
+                      <Badge color={statusColor(cr)}>HTTP {cr.status || "ERR"}</Badge>
+                      <span style={{ fontSize: 11, color: "var(--dim)", fontFamily: "var(--font-mono)", minWidth: 48, textAlign: "right" }}>{cr.responseTimeMs}ms</span>
+                    </div>
+                    );
+                  })}
+                </Section>
+
+                {/* Blocking Diagnosis */}
+                {wafBlocked.length > 0 && (
+                  <div style={{ background: "var(--red-bg)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: 10, padding: "16px 20px", marginTop: 16, borderLeft: "3px solid var(--red)" }}>
+                    <div style={{ fontWeight: 700, color: "var(--red)", marginBottom: 6, fontSize: 13 }}>
+                      {"\uD83D\uDEE1\uFE0F"} {wafBlocked.length} crawler{wafBlocked.length > 1 ? "s" : ""} blocked at the WAF / edge
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
+                      <strong style={{ color: "var(--text)" }}>{wafBlocked.map(b => b.name).join(", ")}</strong> received a 403/401 response while the Chrome baseline returned 200. This is a <strong style={{ color: "var(--text)" }}>hard block at the firewall or CDN level</strong>, not in robots.txt. The server actively rejects requests carrying these user agent strings. Fix this in your CDN dashboard (look for "AI bot blocking" or "bot fight mode" settings), not in your site files.
+                    </div>
+                  </div>
+                )}
+                {softBlocked.length > 0 && (
+                  <div style={{ background: "var(--orange-bg)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 10, padding: "16px 20px", marginTop: 16, borderLeft: "3px solid var(--orange)" }}>
+                    <div style={{ fontWeight: 700, color: "var(--orange)", marginBottom: 6, fontSize: 13 }}>
+                      {"\u26A0"} {softBlocked.length} crawler{softBlocked.length > 1 ? "s" : ""} likely soft-blocked (served different content)
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
+                      <strong style={{ color: "var(--text)" }}>{softBlocked.map(b => `${b.name} (${(b.bodySize / 1024).toFixed(1)}KB)`).join(", ")}</strong> received a 200 status but a significantly smaller response than the Chrome baseline ({(baselineBodySize / 1024).toFixed(1)}KB). This usually means the server is serving a <strong style={{ color: "var(--text)" }}>challenge page, CAPTCHA, or stripped-down version</strong> instead of the real content. The bot "gets in" but sees different content to a real browser. Check whether your CDN is serving JS challenges or interstitial pages to these user agents.
+                    </div>
+                  </div>
+                )}
+                {robotsBlocked.length > 0 && (
+                  <div style={{ background: "var(--red-bg)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: 10, padding: "16px 20px", marginTop: 16, borderLeft: "3px solid var(--red)" }}>
+                    <div style={{ fontWeight: 700, color: "var(--red)", marginBottom: 6, fontSize: 13 }}>
+                      {"\uD83D\uDCD1"} {robotsBlocked.length} crawler{robotsBlocked.length > 1 ? "s" : ""} blocked by robots.txt
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
+                      The site's robots.txt disallows: <strong style={{ color: "var(--text)" }}>{robotsBlocked.map(b => b.name).join(", ")}</strong>. This is a <strong style={{ color: "var(--text)" }}>voluntary signal</strong> {"\u2014"} well-behaved crawlers will respect it, but it doesn't technically prevent access. Unlike a WAF block, robots.txt is a polite request. Fix this in your robots.txt file by removing or modifying the Disallow rules for these user agents. If the block was added by your CDN (managed robots.txt), check your CDN dashboard.
+                    </div>
+                  </div>
+                )}
+                {intermittent.length > 0 && (
+                  <div style={{ background: "var(--orange-bg)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 10, padding: "16px 20px", marginTop: 16, borderLeft: "3px solid var(--orange)" }}>
+                    <div style={{ fontWeight: 700, color: "var(--orange)", marginBottom: 6, fontSize: 13 }}>
+                      {intermittent.length} crawler{intermittent.length > 1 ? "s" : ""} with intermittent responses
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
+                      <strong style={{ color: "var(--text)" }}>{intermittent.map(b => b.name).join(", ")}</strong> received different status codes across 3 passes. This usually means the server's WAF or CDN is applying rate limiting, challenge-based blocking, or probabilistic bot detection. LLM visibility for these crawlers is unreliable.
+                    </div>
+                  </div>
+                )}
+                {blocked.length === 0 && intermittent.length === 0 && robotsBlocked.length === 0 && softBlocked.length === 0 && ok.length === bots.length && (
+                  <div style={{ background: "var(--green-bg)", border: "1px solid rgba(74,222,128,0.2)", borderRadius: 10, padding: "16px 20px", marginTop: 16, borderLeft: "3px solid var(--green)" }}>
+                    <div style={{ fontWeight: 700, color: "var(--green)", marginBottom: 4, fontSize: 13 }}>All crawlers allowed consistently</div>
+                    <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
+                      All tested LLM crawlers received a 200 response with comparable body sizes across all 3 passes, and none are blocked by robots.txt or meta robots tags.
+                    </div>
+                  </div>
+                )}
+
+                {/* CC Index Coverage */}
+                {(ccIndex || ccLoading) && (
+                  <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, marginTop: 20, overflow: "hidden" }}>
+                    <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 10 }}>
+                      <span style={{ fontSize: 16 }}>{"\uD83D\uDDC4\uFE0F"}</span>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 13 }}>Common Crawl Index Coverage</div>
+                        <div style={{ fontSize: 11, color: "var(--dim)" }}>Is this domain in the training data archive?</div>
+                      </div>
+                    </div>
+                    {ccLoading && (
+                      <div style={{ padding: "20px 18px", fontSize: 12, color: "var(--dim)" }}>Querying Common Crawl Index{"\u2026"}</div>
+                    )}
+                    {ccIndex && ccIndex.error && (
+                      <div style={{ padding: "14px 18px", fontSize: 12, color: "var(--red)" }}>Error: {ccIndex.error}</div>
+                    )}
+                    {ccIndex && !ccIndex.error && (
+                      <div style={{ padding: "14px 18px" }}>
+                        {/* Summary cards */}
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 10, marginBottom: 14 }}>
+                          <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 14px", borderLeft: `3px solid ${ccIndex.inIndex ? "var(--green)" : "var(--red)"}` }}>
+                            <div style={{ fontSize: 18, fontWeight: 700, color: ccIndex.inIndex ? "var(--green)" : "var(--red)", fontFamily: "var(--font-mono)" }}>{ccIndex.inIndex ? "Yes" : "No"}</div>
+                            <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 2, fontWeight: 600 }}>In Archive</div>
+                          </div>
+                          {ccIndex.inIndex && (
+                            <>
+                              <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 14px", borderLeft: "3px solid var(--cyan)" }}>
+                                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--cyan)", fontFamily: "var(--font-mono)" }}>{ccIndex.totalBlocks > 0 ? `~${ccIndex.totalBlocks.toLocaleString()}` : ccIndex.sampleSize}</div>
+                                <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 2, fontWeight: 600 }}>{ccIndex.totalBlocks > 0 ? "Est. Pages" : "Pages Found"}</div>
+                              </div>
+                              <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 14px", borderLeft: "3px solid var(--purple)" }}>
+                                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--purple)", fontFamily: "var(--font-mono)" }}>{ccIndex.mostRecent || "?"}</div>
+                                <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 2, fontWeight: 600 }}>Last Crawled</div>
+                              </div>
+                            </>
+                          )}
+                        </div>
+
+                        {ccIndex.inIndex && (
+                          <>
+                            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7, marginBottom: 10 }}>
+                              Crawl: <strong style={{ color: "var(--text)" }}>{ccIndex.crawlId}</strong>
+                              {ccIndex.uniqueUrlsInSample > 0 && <> {"\u2022"} {ccIndex.uniqueUrlsInSample} unique URLs in sample</>}
+                              {ccIndex.oldest && ccIndex.oldest !== ccIndex.mostRecent && <> {"\u2022"} Date range: {ccIndex.oldest} to {ccIndex.mostRecent}</>}
+                            </div>
+
+                            {/* Sample URLs */}
+                            {ccIndex.sampleUrls && ccIndex.sampleUrls.length > 0 && (
+                              <Section title="Sample Indexed URLs" count={ccIndex.sampleUrls.length} defaultOpen={false}>
+                                {ccIndex.sampleUrls.map((su, si) => (
+                                  <div key={si} style={{ padding: "6px 0", borderBottom: si < ccIndex.sampleUrls.length - 1 ? "1px solid var(--border)" : "none", display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
+                                    <div style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{su.url}</div>
+                                    <div style={{ fontSize: 10, color: "var(--dim)" }}>{su.timestamp} {"\u2022"} {su.status}</div>
+                                  </div>
+                                ))}
+                              </Section>
+                            )}
+                          </>
+                        )}
+
+                        {!ccIndex.inIndex && (
+                          <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
+                            This domain was <strong style={{ color: "var(--red)" }}>not found</strong> in the latest Common Crawl archive ({ccIndex.crawlId}). This means the site is not in the open training dataset that most LLMs were trained on. Check robots.txt for CCBot blocking, and review the domain's Harmonic Centrality {"\u2014"} low centrality means Common Crawl deprioritises the domain.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Limitations disclaimer */}
+                <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 18px", marginTop: 16 }}>
+                  <div style={{ fontSize: 11, color: "var(--dim)", lineHeight: 1.7 }}>
+                    <strong style={{ color: "var(--muted)" }}>What this test covers and what it doesn't:</strong> This test sends real HTTP requests with each bot's user agent string and compares responses against a Chrome baseline. It reliably detects <strong style={{ color: "var(--muted)" }}>UA-based blocking</strong> (the most common type) in both robots.txt and at the WAF/edge, and can flag <strong style={{ color: "var(--muted)" }}>soft blocks</strong> where the server serves different content to bots. However, it <strong style={{ color: "var(--muted)" }}>cannot detect IP-based or behavioural bot management</strong> (e.g. Akamai, DataDome, PerimeterX) because these requests come from Cloudflare Worker IPs, not the real bots' infrastructure. For a complete picture, verify against server access logs showing real crawler traffic, or use the verification method described in Common Crawl's documentation (forward-confirmed reverse DNS on logged IPs).
+                  </div>
+                </div>
+              </>
+            );
+          })()}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   AGENT READINESS COMPONENT
+   ═══════════════════════════════════════════════════════════════════ */
+const categoryMeta = { "search": { icon: "\uD83D\uDD0D", color: "var(--accent)" }, "newsletter": { icon: "\uD83D\uDCE7", color: "var(--purple)" }, "contact": { icon: "\uD83D\uDCAC", color: "var(--accent)" }, "booking": { icon: "\uD83D\uDCC5", color: "var(--cyan)" }, "appointment": { icon: "\uD83D\uDCC5", color: "var(--cyan)" }, "checkout": { icon: "\uD83D\uDCB3", color: "var(--green)" }, "add-to-cart": { icon: "\uD83D\uDED2", color: "var(--green)" }, "login": { icon: "\uD83D\uDD10", color: "var(--muted)" }, "registration": { icon: "\uD83D\uDCDD", color: "var(--muted)" }, "download": { icon: "\uD83D\uDCE5", color: "var(--purple)" }, "chat": { icon: "\uD83D\uDCAC", color: "var(--accent)" }, "captcha": { icon: "\uD83D\uDEE1\uFE0F", color: "var(--red)" }, "bot-detection": { icon: "\uD83D\uDEE1\uFE0F", color: "var(--red)" }, "consent": { icon: "\uD83C\uDF6A", color: "var(--orange)" }, "schema": { icon: "\uD83D\uDCCB", color: "var(--purple)" }, "user-defined": { icon: "\u270F\uFE0F", color: "var(--cyan)" }, "other-form": { icon: "\uD83D\uDCC4", color: "var(--muted)" }, "other-action": { icon: "\u26A1", color: "var(--muted)" } };
+const getCatMeta = (cat) => categoryMeta[cat] || { icon: "\u2022", color: "var(--muted)" };
+const scoreColors = { "good": "var(--green)", "partial": "var(--orange)", "poor": "var(--red)", "blocker": "var(--red)", "warning": "var(--orange)" };
+const scoreLabels = { "good": "Agent Ready", "partial": "Partial Issues", "poor": "Not Agent Ready", "blocker": "Agent Blocker", "warning": "Warning" };
+
+function AgentReadiness({ sourceDoc: externalDoc, sourceHtml }) {
+  const [zones, setZones] = useState([]);
+  const [selected, setSelected] = useState(new Set());
+  const [userActions, setUserActions] = useState("");
+  const [auditResults, setAuditResults] = useState(null);
+  const [globalSignals, setGlobalSignals] = useState([]);
+  const [phase, setPhase] = useState("select");
+  const [internalDoc, setInternalDoc] = useState(null);
+
+  const sourceDoc = externalDoc || internalDoc;
+
+  useEffect(() => {
+    if (externalDoc) { setInternalDoc(null); return; }
+    if (sourceHtml && sourceHtml.trim().length > 50) setInternalDoc(parseDoc(sourceHtml));
+    else setInternalDoc(null);
+  }, [sourceHtml, externalDoc]);
+
+  useEffect(() => {
+    if (!sourceDoc) return;
+    const detected = detectActionZones(sourceDoc, sourceHtml);
+    setZones(detected);
+    const autoSelect = new Set();
+    detected.forEach(z => { if (z.confidence >= 0.7 && z.category !== "filter") autoSelect.add(z.id); });
+    setSelected(autoSelect);
+    setAuditResults(null);
+    setPhase("select");
+    setGlobalSignals(checkGlobalAgentSignals(sourceDoc, sourceHtml));
+  }, [sourceDoc, sourceHtml]);
+
+  const toggleZone = useCallback((id) => { setSelected(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; }); }, []);
+  const selectAll = useCallback(() => { setSelected(new Set(zones.map(z => z.id))); }, [zones]);
+  const selectNone = useCallback(() => { setSelected(new Set()); }, []);
+
+  const runAudit = useCallback(() => {
+    if (!sourceDoc) return;
+    let confirmedZones = zones.filter(z => selected.has(z.id));
+    if (userActions.trim()) {
+      const extraZones = matchUserActions(userActions.split("\n").map(a => a.trim()).filter(a => a.length > 0), confirmedZones, sourceDoc);
+      confirmedZones = [...confirmedZones, ...extraZones];
+    }
+    setAuditResults(runAgentReadinessAudit(confirmedZones, sourceDoc));
+    setPhase("results");
+  }, [zones, selected, userActions, sourceDoc]);
+
+  if (!sourceDoc) return <div style={{ padding: "40px 20px", textAlign: "center", color: "var(--dim)" }}>Paste page source HTML in the Page Analysis tab first, then come here to check agent readiness.</div>;
+
+  const actionZones = zones.filter(z => z.type !== "blocker");
+  const blockers = zones.filter(z => z.type === "blocker");
+
+  if (phase === "select") {
+    return (
+      <div className="fade-in">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 24 }}>
+          {[{ n: actionZones.length, label: "Action Points", color: actionZones.length > 0 ? "var(--emerald)" : "var(--dim)" },{ n: blockers.length, label: "Blockers", color: blockers.length > 0 ? "var(--red)" : "var(--green)" },{ n: zones.filter(z => z.type === "schema-action").length, label: "Schema Actions", color: "var(--purple)" }].map((card, i) => (
+            <div key={i} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", borderLeft: `3px solid ${card.color}` }}>
+              <div style={{ fontSize: 24, fontWeight: 700, color: card.color, fontFamily: "var(--font-mono)" }}>{card.n}</div>
+              <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 3, fontWeight: 600 }}>{card.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {zones.length === 0 ? (
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "32px 24px", textAlign: "center" }}>
+            <div style={{ fontSize: 28, marginBottom: 12 }}>{"\uD83E\uDD37"}</div>
+            <div style={{ color: "var(--muted)", fontSize: 14, lineHeight: 1.6, maxWidth: 400, margin: "0 auto" }}>No action zones detected in the HTML source. This could mean the page is purely informational, or that all interactive elements are loaded via JavaScript.<br/><br/>Try adding actions manually below.</div>
+          </div>
+        ) : (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>Detected Action Points <span style={{ fontSize: 12, color: "var(--dim)", fontWeight: 400, marginLeft: 8 }}>Tick the actions that matter for this page</span></div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={selectAll} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--muted)", fontSize: 11, cursor: "pointer", padding: "4px 12px", fontFamily: "var(--font-body)" }}>Select all</button>
+                <button onClick={selectNone} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--muted)", fontSize: 11, cursor: "pointer", padding: "4px 12px", fontFamily: "var(--font-body)" }}>Clear</button>
+              </div>
+            </div>
+
+            {blockers.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--red)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8, padding: "0 4px" }}>{"\u26A0"} Blockers Detected</div>
+                {blockers.map(z => { const meta = getCatMeta(z.category); return (
+                  <label key={z.id} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 14px", background: "var(--red-bg)", border: "1px solid var(--border)", borderRadius: 8, cursor: "pointer", marginBottom: 6 }}>
+                    <input type="checkbox" checked={selected.has(z.id)} onChange={() => toggleZone(z.id)} style={{ marginTop: 3, accentColor: "var(--red)" }} />
+                    <div style={{ flex: 1 }}><div style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><span>{meta.icon}</span>{z.label}</div><div style={{ fontSize: 11, color: "var(--dim)", marginTop: 2 }}>{z.elementDesc}</div></div>
+                    <Badge color="var(--red)">{z.category}</Badge>
+                  </label>
+                ); })}
+              </div>
+            )}
+
+            {actionZones.map(z => { const meta = getCatMeta(z.category); return (
+              <label key={z.id} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 14px", background: selected.has(z.id) ? "var(--emerald-dim)" : "var(--surface)", border: `1px solid ${selected.has(z.id) ? "var(--emerald)" + "40" : "var(--border)"}`, borderRadius: 8, cursor: "pointer", marginBottom: 6, transition: "all 0.15s" }}>
+                <input type="checkbox" checked={selected.has(z.id)} onChange={() => toggleZone(z.id)} style={{ marginTop: 3, accentColor: "var(--emerald)" }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><span>{meta.icon}</span>{z.label}{z.confidence < 0.7 && <span style={{ fontSize: 10, color: "var(--dim)", fontWeight: 400 }}>(low confidence)</span>}</div>
+                  <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 2 }}>{z.elementDesc}</div>
+                  {z.nearbyText && <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 1, fontStyle: "italic" }}>Context: {z.nearbyText.slice(0, 80)}</div>}
+                </div>
+                <Badge color={meta.color}>{z.category}</Badge>
+              </label>
+            ); })}
+          </div>
+        )}
+
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Additional Actions <span style={{ fontSize: 12, color: "var(--dim)", fontWeight: 400, marginLeft: 8 }}>Actions the scan missed? One per line.</span></div>
+          <textarea value={userActions} onChange={e => setUserActions(e.target.value)} placeholder={"e.g.\nBook a villa\nSubscribe to newsletter\nDownload brochure"} rows={3}
+            style={{ width: "100%", padding: "12px 14px", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)", fontFamily: "var(--font-body)", fontSize: 13, resize: "vertical", outline: "none", lineHeight: 1.6 }}
+            onFocus={e => e.target.style.borderColor = "var(--emerald)"} onBlur={e => e.target.style.borderColor = "var(--border)"} />
+        </div>
+
+        {globalSignals.length > 0 && (
+          <Section title="Page-Level Agent Signals" count={globalSignals.length} defaultOpen={false}>
+            {globalSignals.map((sig, i) => <Row key={i} cols="24px 1fr"><span style={{ color: sig.present ? "var(--green)" : "var(--dim)", fontSize: 14, textAlign: "center" }}>{sig.present ? "\u2713" : "\u2014"}</span><div><div style={{ fontSize: 13, fontWeight: 600, color: sig.present ? "var(--text)" : "var(--muted)" }}>{sig.label}</div><div style={{ fontSize: 11, color: "var(--dim)", marginTop: 1 }}>{sig.detail}</div></div></Row>)}
+          </Section>
+        )}
+
+        <button onClick={runAudit} disabled={selected.size === 0 && !userActions.trim()} style={{
+          width: "100%", padding: "14px 24px", background: (selected.size > 0 || userActions.trim()) ? "var(--emerald)" : "var(--dim)",
+          color: "var(--bg)", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "var(--font-body)", cursor: (selected.size > 0 || userActions.trim()) ? "pointer" : "default", marginTop: 8,
+        }}>Audit {selected.size} Action{selected.size !== 1 ? "s" : ""}{userActions.trim() ? ` + ${userActions.split("\n").filter(a => a.trim()).length} custom` : ""} for Agent Readiness</button>
+      </div>
+    );
+  }
+
+  if (phase === "results" && auditResults) {
+    const goodCount = auditResults.filter(r => r.score === "good").length;
+    const partialCount = auditResults.filter(r => r.score === "partial" || r.score === "warning").length;
+    const poorCount = auditResults.filter(r => r.score === "poor" || r.score === "blocker").length;
+    const totalIssues = auditResults.reduce((sum, r) => sum + r.issues.length, 0);
+
+    return (
+      <div className="fade-in">
+        <button onClick={() => { setPhase("select"); setAuditResults(null); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, color: "var(--muted)", fontSize: 12, cursor: "pointer", padding: "6px 16px", fontFamily: "var(--font-body)", marginBottom: 16, fontWeight: 600 }}>{"\u2190"} Back to selection</button>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12, marginBottom: 24 }}>
+          {[{ n: goodCount, label: "Agent Ready", color: goodCount > 0 ? "var(--green)" : "var(--dim)" },{ n: partialCount, label: "Partial Issues", color: partialCount > 0 ? "var(--orange)" : "var(--dim)" },{ n: poorCount, label: "Not Ready / Blocked", color: poorCount > 0 ? "var(--red)" : "var(--green)" },{ n: totalIssues, label: "Total Issues", color: totalIssues > 0 ? "var(--orange)" : "var(--green)" }].map((card, i) => (
+            <div key={i} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", borderLeft: `3px solid ${card.color}` }}>
+              <div style={{ fontSize: 24, fontWeight: 700, color: card.color, fontFamily: "var(--font-mono)" }}>{card.n}</div>
+              <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 3, fontWeight: 600 }}>{card.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {auditResults.map((result, i) => { const { zone, issues, score } = result; const meta = getCatMeta(zone.category); const sColor = scoreColors[score] || "var(--muted)"; const sLabel = scoreLabels[score] || score; return (
+          <div key={i} className="fade-in" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, marginBottom: 12, overflow: "hidden", borderLeft: `3px solid ${sColor}` }}>
+            <div style={{ padding: "14px 18px", display: "flex", alignItems: "center", gap: 12, borderBottom: issues.length > 0 ? "1px solid var(--border)" : "none" }}>
+              <span style={{ fontSize: 20 }}>{meta.icon}</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 700 }}>{zone.label}</div>
+                <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 2 }}>{zone.elementDesc}{zone.source === "user-defined" && <span style={{ color: "var(--cyan)", marginLeft: 8 }}>(user-defined)</span>}</div>
+              </div>
+              <Badge color={sColor}>{sLabel}</Badge>
+            </div>
+            {issues.length > 0 && <div>{issues.map((issue, j) => (
+              <div key={j} style={{ padding: "12px 18px", borderBottom: j < issues.length - 1 ? "1px solid var(--border)" : "none", background: issue.severity === "high" ? "var(--red-bg)" : "transparent" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                  <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: sevColor(issue.severity) }} />
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{issue.title}</span>
+                  <Badge color={sevColor(issue.severity)}>{issue.severity}</Badge>
+                </div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginLeft: 14, lineHeight: 1.6 }}>{issue.detail}</div>
+                <div style={{ fontSize: 12, color: "var(--dim)", marginLeft: 14, marginTop: 4, padding: "9px 12px", background: "var(--surface2)", borderRadius: 6, borderLeft: "3px solid var(--orange)", lineHeight: 1.7 }}>
+                  <strong style={{ color: "var(--orange)" }}>Impact:</strong> {issue.impact}
+                </div>
+              </div>
+            ))}</div>}
+            {issues.length === 0 && <div style={{ padding: "0 18px 14px", fontSize: 12, color: "var(--green)" }}>{"\u2713"} No agent readiness issues found for this action.</div>}
+          </div>
+        ); })}
+
+        {globalSignals.length > 0 && (
+          <Section title="Page-Level Agent Signals" count={globalSignals.length} defaultOpen={false}>
+            {globalSignals.map((sig, i) => <Row key={i} cols="24px 1fr"><span style={{ color: sig.present ? "var(--green)" : "var(--dim)", fontSize: 14, textAlign: "center" }}>{sig.present ? "\u2713" : "\u2014"}</span><div><div style={{ fontSize: 13, fontWeight: 600, color: sig.present ? "var(--text)" : "var(--muted)" }}>{sig.label}</div><div style={{ fontSize: 11, color: "var(--dim)", marginTop: 1 }}>{sig.detail}</div></div></Row>)}
+          </Section>
+        )}
+      </div>
+    );
+  }
+  return null;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   MAIN APP
+   ═══════════════════════════════════════════════════════════════════ */
+function App() {
+  const [mode, setMode] = useState("analysis");
+  const [sourceHtml, setSourceHtml] = useState("");
+  const [renderedHtml, setRenderedHtml] = useState("");
+  const [results, setResults] = useState(null);
+  const [tab, setTab] = useState("audit");
+  const [showHelp, setShowHelp] = useState(false);
+  const [copyMsg, setCopyMsg] = useState("");
+  const [crawlResults, setCrawlResults] = useState(null);
+  const [sourceDoc, setSourceDoc] = useState(null);
+
+  const run = useCallback(() => {
+    if (!sourceHtml.trim()) return;
+    setResults(analyze(sourceHtml, renderedHtml));
+    setSourceDoc(parseDoc(sourceHtml));
+    setTab("audit");
+  }, [sourceHtml, renderedHtml]);
+
+  const clear = useCallback(() => { setSourceHtml(""); setRenderedHtml(""); setResults(null); setSourceDoc(null); }, []);
+
+  const copyReport = useCallback(() => {
+    if (!results) return;
+    const text = generateReport(results, crawlResults);
+    navigator.clipboard.writeText(text).then(() => {
+      setCopyMsg("Copied!");
+      setTimeout(() => setCopyMsg(""), 2000);
+    });
+  }, [results, crawlResults]);
+
+  const r = results;
+  const highCount = r?.issues.filter(i => i.severity === "high").length || 0;
+  const medCount = r?.issues.filter(i => i.severity === "medium").length || 0;
+  const lowCount = r?.issues.filter(i => i.severity === "low").length || 0;
+  const totalIssues = highCount + medCount + lowCount;
+  const hasDiff = !!r?.diff;
+  const diffTotal = hasDiff ? (r.diff.text.length + r.diff.links.length + r.diff.headings.length + r.diff.schema.length + r.diff.images.length) : 0;
+
+  return (
+    <div>
+      {showHelp && <HelpGuide onClose={() => setShowHelp(false)} />}
+
+      {/* HEADER */}
+      <div style={{ borderBottom: "1px solid var(--border)", padding: "20px 28px", background: "var(--surface)" }}>
+        <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0, letterSpacing: "-0.03em", display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ color: "var(--accent)", fontSize: 24 }}>{"\u25C8"}</span>
+              LLM Visibility Analyzer
+            </h1>
+            <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 4, marginBottom: 0 }}>
+              See what AI systems can extract from your pages, whether they can access them, and whether agents can take actions.
+            </p>
+          </div>
+          <button onClick={() => setShowHelp(true)} style={{
+            background: "var(--surface2)", color: "var(--accent)", border: "1px solid var(--border)",
+            borderRadius: 8, padding: "8px 18px", fontSize: 13, fontWeight: 600,
+            fontFamily: "var(--font-body)", cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
+          }}>
+            <span style={{ fontSize: 16 }}>?</span> How to use
+          </button>
+        </div>
+      </div>
+
+      {/* MODE SWITCHER */}
+      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "20px 24px 0" }}>
+        <div style={{ display: "flex", gap: 4, background: "var(--surface)", borderRadius: 10, padding: 4, border: "1px solid var(--border)", width: "fit-content", marginBottom: 24 }}>
+          {[
+            { id: "analysis", label: "Page Analysis", icon: "\uD83D\uDD0D" },
+            { id: "agent", label: "Agent Readiness", icon: "\uD83E\uDD16" },
+            { id: "crawl", label: "Crawl Test", icon: "\uD83D\uDD17" },
+          ].map(m => (
+            <button key={m.id} onClick={() => setMode(m.id)} style={{
+              padding: "9px 20px", fontSize: 13, fontWeight: 600, fontFamily: "var(--font-body)",
+              color: mode === m.id ? "var(--text)" : "var(--dim)",
+              background: mode === m.id ? "var(--surface2)" : "transparent",
+              border: mode === m.id ? "1px solid var(--border)" : "1px solid transparent",
+              borderRadius: 7, cursor: "pointer", transition: "all 0.15s",
+              display: "flex", alignItems: "center", gap: 6,
+            }}>
+              <span style={{ fontSize: 14 }}>{m.icon}</span>
+              {m.label}
+            </button>
+          ))}
+        </div>
+
+        {/* ═══ MODE: PAGE ANALYSIS ═══ */}
+        {mode === "analysis" && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 18 }}>
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+                  Source HTML <span style={{ color: "var(--red)" }}>*</span>
+                </div>
+                <div style={{ fontSize: 12, color: "var(--dim)", marginBottom: 10, lineHeight: 1.7 }}>
+                  Right-click page {"\u2192"} <strong style={{ color: "var(--muted)" }}>View Page Source</strong> (Ctrl+U / Cmd+U). Copy everything.
+                </div>
+                <textarea value={sourceHtml} onChange={e => setSourceHtml(e.target.value)}
+                  placeholder="Paste full View Page Source HTML here..." spellCheck={false}
+                  style={{ flex: 1, minHeight: 160, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, padding: 16, resize: "vertical", outline: "none" }}
+                  onFocus={e => e.target.style.borderColor = "var(--accent)"} onBlur={e => e.target.style.borderColor = "var(--border)"} />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--purple)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+                  Rendered DOM <span style={{ color: "var(--dim)", fontWeight: 400, textTransform: "none", letterSpacing: "normal", fontSize: 12 }}>(optional)</span>
+                </div>
+                <div style={{ fontSize: 12, color: "var(--dim)", marginBottom: 10, lineHeight: 1.7 }}>
+                  DevTools (F12) {"\u2192"} <strong style={{ color: "var(--muted)" }}>Elements</strong> {"\u2192"} right-click <code style={{ background: "var(--surface2)", padding: "1px 6px", borderRadius: 3, color: "var(--purple)", fontSize: 11, fontFamily: "var(--font-mono)" }}>&lt;html&gt;</code> {"\u2192"} Copy outerHTML.
+                </div>
+                <textarea value={renderedHtml} onChange={e => setRenderedHtml(e.target.value)}
+                  placeholder="Paste rendered DOM HTML here (optional)..." spellCheck={false}
+                  style={{ flex: 1, minHeight: 160, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, padding: 16, resize: "vertical", outline: "none" }}
+                  onFocus={e => e.target.style.borderColor = "var(--purple)"} onBlur={e => e.target.style.borderColor = "var(--border)"} />
+              </div>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
+              <button onClick={run} disabled={!sourceHtml.trim()} style={{
+                background: sourceHtml.trim() ? "var(--accent)" : "var(--dim)", color: "var(--bg)", border: "none",
+                borderRadius: 10, padding: "11px 36px", fontSize: 14, fontWeight: 700,
+                fontFamily: "var(--font-body)", cursor: sourceHtml.trim() ? "pointer" : "default",
+              }}>Analyze Page</button>
+              {r && (
+                <>
+                  <button onClick={copyReport} style={{
+                    background: "var(--surface2)", color: copyMsg ? "var(--green)" : "var(--muted)",
+                    border: "1px solid var(--border)", borderRadius: 10, padding: "10px 22px",
+                    fontSize: 13, fontWeight: 600, fontFamily: "var(--font-body)", cursor: "pointer",
+                  }}>{copyMsg || "Copy Report"}</button>
+                  <button onClick={clear} style={{
+                    background: "transparent", color: "var(--muted)", border: "1px solid var(--border)",
+                    borderRadius: 10, padding: "10px 22px", fontSize: 13, fontWeight: 600,
+                    fontFamily: "var(--font-body)", cursor: "pointer",
+                  }}>Clear</button>
+                </>
+              )}
+            </div>
+
+            {/* RESULTS */}
+            {r && (
+              <div className="fade-in">
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12, marginBottom: 24 }}>
+                  {[
+                    { n: highCount, label: "High Issues", color: highCount > 0 ? "var(--red)" : "var(--green)" },
+                    { n: medCount, label: "Medium Issues", color: medCount > 0 ? "var(--orange)" : "var(--green)" },
+                    { n: r.sourceData.links.length, label: "Crawlable Links", color: "var(--accent)" },
+                    { n: r.sourceData.schema.length, label: "Schema Blocks", color: "var(--purple)" },
+                    { n: r.sourceData.headings.length, label: "Headings", color: "var(--green)" },
+                    { n: r.sourceData.images.length, label: "Images", color: "var(--cyan)" },
+                    { n: r.sourceData.text.length, label: "Text Blocks", color: "var(--text)" },
+                    ...(hasDiff ? [{ n: diffTotal, label: "JS-Only Content", color: diffTotal > 0 ? "var(--red)" : "var(--green)" }] : []),
+                  ].map((card, i) => (
+                    <div key={i} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", borderLeft: `3px solid ${card.color}` }}>
+                      <div style={{ fontSize: 24, fontWeight: 700, color: card.color, fontFamily: "var(--font-mono)" }}>{card.n}</div>
+                      <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 3, fontWeight: 600 }}>{card.label}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: "flex", gap: 0, borderBottom: "1px solid var(--border)", marginBottom: 24 }}>
+                  {[
+                    { id: "audit", label: `Issues & Flags${totalIssues > 0 ? ` (${totalIssues})` : ""}` },
+                    { id: "content", label: "What LLMs Can See" },
+                    ...(hasDiff ? [{ id: "diff", label: `JS-Only Content${diffTotal > 0 ? ` (${diffTotal})` : ""}` }] : []),
+                  ].map(t => (
+                    <button key={t.id} onClick={() => setTab(t.id)} style={{
+                      padding: "12px 22px", fontSize: 13, fontWeight: 600, fontFamily: "var(--font-body)",
+                      color: tab === t.id ? "var(--text)" : "var(--dim)", background: "none", border: "none",
+                      borderBottom: tab === t.id ? "2px solid var(--accent)" : "2px solid transparent", cursor: "pointer",
+                    }}>{t.label}</button>
+                  ))}
+                </div>
+
+                {tab === "audit" && (
+                  r.issues.length === 0 ? (
+                    <Empty><span style={{ fontSize: 28, color: "var(--green)" }}>{"\u2713"}</span><p style={{ marginTop: 10 }}>No issues detected.</p></Empty>
+                  ) : (
+                    <Section title="Issues Found" count={r.issues.length} defaultOpen tagText={highCount > 0 ? `${highCount} high` : "clean"} tagColor={highCount > 0 ? "var(--red)" : "var(--green)"}>
+                      {r.issues.map((issue, i) => (
+                        <div key={i} style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 14, padding: "14px 18px", borderBottom: "1px solid var(--border)", background: issue.severity === "high" ? "var(--red-bg)" : issue.severity === "medium" ? "var(--orange-bg)" : "transparent" }}>
+                          <Badge color={sevColor(issue.severity)}>{issue.severity}</Badge>
+                          <div>
+                            <div style={{ fontWeight: 600, marginBottom: 4, display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+                              {issue.title}
+                              {issue.count > 1 && <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 8px", borderRadius: 10, background: "var(--dim)30", color: "var(--muted)", fontFamily: "var(--font-mono)" }}>{"\u00D7"}{issue.count}</span>}
+                            </div>
+                            <div style={{ fontSize: 12, color: "var(--muted)", wordBreak: "break-all", whiteSpace: "pre-wrap", fontFamily: "var(--font-mono)", lineHeight: 1.6 }}>{issue.detail}</div>
+                            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, padding: "9px 12px", background: "var(--surface2)", borderRadius: 6, borderLeft: "3px solid var(--orange)", lineHeight: 1.7 }}>
+                              <strong style={{ color: "var(--orange)" }}>Why it matters:</strong> {issue.why}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </Section>
+                  )
+                )}
+
+                {tab === "content" && (
+                  <>
+                    <Section title="Meta & OG Tags" count={r.sourceData.meta.length} defaultOpen>
+                      {r.sourceData.meta.map((m, i) => <Row key={i} cols="170px 1fr"><span style={{ color: "var(--accent)", fontWeight: 600, fontFamily: "var(--font-mono)", fontSize: 12 }}>{m.name}</span><span style={{ color: "var(--muted)", wordBreak: "break-all", fontSize: 12 }}>{trunc(m.content, 200)}</span></Row>)}
+                      {r.sourceData.meta.length === 0 && <Empty>No meta tags found</Empty>}
+                    </Section>
+                    <Section title="Structured Data (JSON-LD)" count={r.sourceData.schema.length} defaultOpen tagColor="var(--purple)">
+                      {r.sourceData.schema.map((s, i) => <div key={i} style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>{s.error ? <span style={{ color: "var(--red)" }}>Parse error {"\u2014"} {s.raw}</span> : <><div style={{ fontWeight: 600, marginBottom: 8, color: "var(--purple)" }}>@type: {s.parsed?.["@type"] || "unknown"}</div><pre style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0, maxHeight: 200, overflow: "auto", fontFamily: "var(--font-mono)" }}>{JSON.stringify(s.parsed, null, 2)}</pre></>}</div>)}
+                      {r.sourceData.schema.length === 0 && <Empty>No JSON-LD structured data found</Empty>}
+                    </Section>
+                    <Section title="Heading Hierarchy" count={r.sourceData.headings.length} defaultOpen={false}>
+                      {r.sourceData.headings.map((h, i) => { const indent = (parseInt(h.level.replace("H","")) - 1) * 22; return <Row key={i} cols="55px 1fr"><span style={{ paddingLeft: indent }}><Badge color={h.level === "H1" ? "var(--accent)" : "var(--dim)"}>{h.level}</Badge></span><span style={{ paddingLeft: indent, fontSize: 13 }}>{trunc(h.text, 120)}</span></Row>; })}
+                      {r.sourceData.headings.length === 0 && <Empty>No headings found</Empty>}
+                    </Section>
+                    <Section title="Crawlable Links" count={r.sourceData.links.length} defaultOpen={false}>
+                      {r.sourceData.links.slice(0, 200).map((l, i) => <Row key={i} cols="1fr 1fr"><span style={{ color: "var(--muted)", wordBreak: "break-all", fontSize: 12, fontFamily: "var(--font-mono)" }}>{trunc(l.href, 80)}</span><span style={{ fontSize: 12 }}>{trunc(l.text, 80)}</span></Row>)}
+                      {r.sourceData.links.length > 200 && <Empty>Showing first 200 of {r.sourceData.links.length}</Empty>}
+                      {r.sourceData.links.length === 0 && <Empty>No crawlable links found</Empty>}
+                    </Section>
+                    <Section title="Images" count={r.sourceData.images.length} defaultOpen={false}>
+                      {r.sourceData.images.slice(0, 100).map((img, i) => <Row key={i} cols="1fr 1fr auto"><span style={{ color: "var(--muted)", wordBreak: "break-all", fontSize: 12, fontFamily: "var(--font-mono)" }}>{trunc(img.src, 80)}</span><span style={{ fontSize: 12 }}>{img.alt || <span style={{ color: "var(--red)", fontStyle: "italic" }}>missing alt text</span>}</span><Badge color={img.hasAlt ? "var(--green)" : "var(--red)"}>{img.hasAlt ? "alt \u2713" : "no alt"}</Badge></Row>)}
+                      {r.sourceData.images.length === 0 && <Empty>No images found</Empty>}
+                    </Section>
+                    <Section title="Text Content Blocks" count={r.sourceData.text.length} defaultOpen={false}>
+                      {r.sourceData.text.slice(0, 100).map((t, i) => <Row key={i} cols="55px 1fr"><span style={{ fontSize: 10, color: "var(--dim)", fontFamily: "var(--font-mono)" }}>&lt;{t.tag}&gt;</span><span style={{ fontSize: 12, color: "var(--muted)" }}>{trunc(t.text, 150)}</span></Row>)}
+                      {r.sourceData.text.length > 100 && <Empty>Showing first 100 of {r.sourceData.text.length}</Empty>}
+                      {r.sourceData.text.length === 0 && <Empty>No text content found</Empty>}
+                    </Section>
+                    <Section title="Data Attributes (JSON)" count={r.sourceData.dataAttrs.length} defaultOpen={false} tagColor="var(--purple)">
+                      {r.sourceData.dataAttrs.slice(0, 50).map((d, i) => <div key={i} style={{ padding: "10px 18px", borderBottom: "1px solid var(--border)" }}><span style={{ color: "var(--accent)", fontSize: 12, fontFamily: "var(--font-mono)" }}>&lt;{d.element} <span style={{ color: "var(--purple)" }}>{d.attr}</span>&gt;</span><pre style={{ fontSize: 11, color: "var(--dim)", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: "4px 0 0", maxHeight: 100, overflow: "auto", fontFamily: "var(--font-mono)" }}>{JSON.stringify(d.data, null, 2).slice(0, 400)}</pre></div>)}
+                      {r.sourceData.dataAttrs.length === 0 && <Empty>No JSON data attributes found</Empty>}
+                    </Section>
+                  </>
+                )}
+
+                {tab === "diff" && hasDiff && (
+                  diffTotal === 0 ? (
+                    <Empty><span style={{ fontSize: 28, color: "var(--green)" }}>{"\u2713"}</span><p style={{ marginTop: 10 }}>No meaningful differences found.</p></Empty>
+                  ) : (
+                    <>
+                      <div style={{ padding: "0 0 18px", fontSize: 13, color: "var(--muted)", lineHeight: 1.7 }}>
+                        The following content <strong style={{ color: "var(--red)" }}>only exists after JavaScript runs</strong> {"\u2014"} LLMs will not see it.
+                      </div>
+                      {r.diff.links.length > 0 && <Section title="Links only in rendered DOM" count={r.diff.links.length} defaultOpen tagText="JS-only" tagColor="var(--red)">{r.diff.links.slice(0,100).map((l,i) => <Row key={i} cols="1fr 1fr" highlight="var(--red-bg)"><span style={{ color: "var(--red)", wordBreak: "break-all", fontSize: 12, fontFamily: "var(--font-mono)" }}>{trunc(l.href,80)}</span><span style={{ fontSize: 12, color: "var(--muted)" }}>{trunc(l.text,80)}</span></Row>)}</Section>}
+                      {r.diff.text.length > 0 && <Section title="Text only in rendered DOM" count={r.diff.text.length} defaultOpen tagText="JS-only" tagColor="var(--red)">{r.diff.text.slice(0,80).map((t,i) => <Row key={i} cols="55px 1fr" highlight="var(--red-bg)"><span style={{ fontSize: 10, color: "var(--dim)", fontFamily: "var(--font-mono)" }}>&lt;{t.tag}&gt;</span><span style={{ fontSize: 12, color: "var(--red)" }}>{trunc(t.text,150)}</span></Row>)}</Section>}
+                      {r.diff.headings.length > 0 && <Section title="Headings only in rendered DOM" count={r.diff.headings.length} defaultOpen tagText="JS-only" tagColor="var(--red)">{r.diff.headings.map((h,i) => <Row key={i} cols="55px 1fr" highlight="var(--red-bg)"><Badge color="var(--red)">{h.level}</Badge><span style={{ color: "var(--red)" }}>{h.text}</span></Row>)}</Section>}
+                      {r.diff.schema.length > 0 && <Section title="Structured data only in rendered DOM" count={r.diff.schema.length} defaultOpen tagText="JS-only" tagColor="var(--red)">{r.diff.schema.map((s,i) => <div key={i} style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)", background: "var(--red-bg)" }}><div style={{ color: "var(--red)", fontWeight: 600 }}>@type: {s.parsed?.["@type"] || "unknown"}</div></div>)}</Section>}
+                      {r.diff.images.length > 0 && <Section title="Images only in rendered DOM" count={r.diff.images.length} defaultOpen={false} tagText="JS-only" tagColor="var(--orange)">{r.diff.images.slice(0,50).map((img,i) => <Row key={i} cols="1fr 1fr"><span style={{ color: "var(--muted)", wordBreak: "break-all", fontSize: 12, fontFamily: "var(--font-mono)" }}>{trunc(img.src,80)}</span><span style={{ fontSize: 12 }}>{img.alt || <span style={{ color: "var(--red)", fontStyle: "italic" }}>no alt</span>}</span></Row>)}</Section>}
+                    </>
+                  )
+                )}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ═══ MODE: AGENT READINESS ═══ */}
+        {mode === "agent" && (
+          <AgentReadiness sourceDoc={sourceDoc} sourceHtml={sourceHtml} />
+        )}
+
+        {/* ═══ MODE: CRAWL TEST ═══ */}
+        {mode === "crawl" && (
+          <CrawlTest onResults={setCrawlResults} />
+        )}
+
+        <div style={{ height: 60 }} />
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
